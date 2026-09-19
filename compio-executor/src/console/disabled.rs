@@ -1,24 +1,35 @@
 //! No-op stand-ins used when the `console` feature is disabled.
 
-use std::marker::PhantomData;
+use std::{marker::PhantomData, panic::Location};
 
 /// Metadata of a spawned task, reported to the console.
 ///
-/// Zero-sized and inert unless the `console` feature is enabled.
+/// Zero-sized and inert unless the `console` feature is enabled — except that
+/// the [flight recorder](crate::dial9) wants the spawn location too, and is
+/// enabled independently of the console, so the location survives here when
+/// that feature is on.
 #[derive(Debug, Clone, Copy)]
-pub struct SpawnMeta;
+pub struct SpawnMeta {
+    #[cfg(feature = "dial9")]
+    loc: Option<&'static Location<'static>>,
+}
 
 impl SpawnMeta {
     /// Capture the location of the caller.
     ///
-    /// Discards it. The spawns that call this stay `#[track_caller]` either
-    /// way: a feature of this crate cannot reach the wrappers in the crates
-    /// that depend on it, so gating them on one of their own would attribute
-    /// every task to compio itself in a build that enables only this one. The
-    /// implicit argument is dead here, and mostly optimised away.
+    /// Discards it unless the `dial9` feature is enabled. The spawns that call
+    /// this stay `#[track_caller]` either way: a feature of this crate cannot
+    /// reach the wrappers in the crates that depend on it, so gating them on
+    /// one of their own would attribute every task to compio itself in a
+    /// build that enables only this one. The implicit argument is dead when
+    /// nothing reads it, and mostly optimised away.
     #[inline(always)]
+    #[cfg_attr(feature = "dial9", track_caller)]
     pub fn capture() -> Self {
-        Self
+        Self {
+            #[cfg(feature = "dial9")]
+            loc: Some(Location::caller()),
+        }
     }
 
     /// Name the task, which the console displays in a column of its own.
@@ -30,7 +41,28 @@ impl SpawnMeta {
     /// Do not report the task to the console at all.
     #[inline(always)]
     pub fn untracked() -> Self {
-        Self
+        Self {
+            #[cfg(feature = "dial9")]
+            loc: None,
+        }
+    }
+
+    /// The location the task was spawned at, for the [flight recorder].
+    ///
+    /// Always `None` without the `dial9` feature, which is the only thing that
+    /// reads it and the only thing that makes this type carry it.
+    ///
+    /// [flight recorder]: crate::dial9
+    #[inline(always)]
+    pub(crate) fn loc(self) -> Option<&'static Location<'static>> {
+        #[cfg(feature = "dial9")]
+        {
+            self.loc
+        }
+        #[cfg(not(feature = "dial9"))]
+        {
+            None
+        }
     }
 }
 

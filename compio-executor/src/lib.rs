@@ -16,6 +16,7 @@ use std::{any::Any, fmt::Debug, ptr::NonNull, task::Waker};
 use crate::queue::{TaskId, TaskQueue};
 
 pub mod console;
+pub mod dial9;
 mod join_handle;
 mod queue;
 mod task;
@@ -193,6 +194,7 @@ impl Executor {
         // SAFETY: Executor cannot be sent to ther thread
         let queue = unsafe { shared.queue.get_unchecked() };
         let task = queue.insert(self.ptr, tracker, fut, meta);
+        dial9::task_spawn(task.id(), meta.loc());
 
         JoinHandle::new(task)
     }
@@ -214,7 +216,10 @@ impl Executor {
         for id in queue.iter_hot().take(self.config.max_interval as _) {
             queue.make_cold(id);
             let task = queue.take(id).expect("Task was not reset back");
-            let res = unsafe { task.run() };
+            let res = {
+                let _poll = dial9::poll_start(id);
+                unsafe { task.run() }
+            };
             if res.is_ready() {
                 // SAFETY: We're removing it soon, so drop will only be called
                 // once. The shared pointer is kept valid until
@@ -222,6 +227,7 @@ impl Executor {
                 // to avoid use-after-free issues with concurrent wakers.
                 unsafe { task.drop() };
                 queue.remove(id);
+                dial9::task_terminate(id);
             } else {
                 queue.reset(id, task);
             }

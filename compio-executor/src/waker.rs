@@ -24,11 +24,13 @@ impl Task {
 
     unsafe fn wake(ptr: *const ()) {
         unsafe { Task::record_waker_op(ptr, WakerOp::Wake) };
+        unsafe { Task::record_dial9_wake(ptr) };
         unsafe { Task::from_raw(ptr) }.schedule();
     }
 
     unsafe fn wake_by_ref(ptr: *const ()) {
         unsafe { Task::record_waker_op(ptr, WakerOp::WakeByRef) };
+        unsafe { Task::record_dial9_wake(ptr) };
         ManuallyDrop::new(unsafe { Task::from_raw(ptr) }).schedule();
     }
 
