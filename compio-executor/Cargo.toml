@@ -32,6 +32,7 @@ loom = { version = "0.7", features = ["checkpoint"] }
 
 [dev-dependencies]
 criterion = { workspace = true }
+iai-callgrind = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 
@@ -49,6 +50,10 @@ dial9 = ["dep:dial9-core", "dep:dial9-trace-format"]
 
 [[bench]]
 name = "schedule"
+harness = false
+
+[[bench]]
+name = "schedule_iai"
 harness = false
 
 [[example]]
