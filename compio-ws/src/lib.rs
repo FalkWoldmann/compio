@@ -12,6 +12,7 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![allow(unused_features)]
 #![warn(missing_docs)]
+#![forbid(unsafe_code)]
 #![deny(rustdoc::broken_intra_doc_links)]
 #![doc(
     html_logo_url = "https://github.com/compio-rs/compio-logo/raw/refs/heads/master/generated/colored-bold.svg"

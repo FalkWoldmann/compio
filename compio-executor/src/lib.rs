@@ -160,17 +160,14 @@ impl Executor {
 
     /// Create a new executor with config.
     pub fn with_config(mut config: ExecutorConfig) -> Self {
-        let ptr = Box::into_raw(Box::new(Shared {
+        let ptr = NonNull::from(Box::leak(Box::new(Shared {
             waker: config.waker.take(),
             sync: SegQueue::new(),
             pending: AtomicUsize::new(0),
             queue: SendWrapper::new(TaskQueue::new(config.local_queue_size)),
-        }));
+        })));
 
-        Self {
-            config,
-            ptr: unsafe { NonNull::new_unchecked(ptr) },
-        }
+        Self { config, ptr }
     }
 
     /// Spawn a future onto the executor.

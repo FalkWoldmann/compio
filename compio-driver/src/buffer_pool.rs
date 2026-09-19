@@ -35,9 +35,7 @@ pub struct BoxAllocator;
 // Default implementation of [`BufferAllocator`]
 impl BufferAllocator for BoxAllocator {
     fn allocate(len: u32) -> NonNull<MaybeUninit<u8>> {
-        let ptr = Box::into_raw(Box::<[u8]>::new_uninit_slice(len as usize)).cast();
-        // SAFETY: Creating `NonNull` from `Box`
-        unsafe { NonNull::new_unchecked(ptr) }
+        NonNull::from(Box::leak(Box::<[u8]>::new_uninit_slice(len as usize))).cast()
     }
 
     unsafe fn deallocate(ptr: NonNull<MaybeUninit<u8>>, len: u32) {

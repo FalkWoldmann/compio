@@ -1,3 +1,4 @@
+#![forbid(unsafe_code)]
 #![doc(
     html_logo_url = "https://github.com/compio-rs/compio-logo/raw/refs/heads/master/generated/colored-bold.svg"
 )]

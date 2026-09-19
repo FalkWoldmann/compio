@@ -1,6 +1,7 @@
 //! An actor framework built for Compio.
 #![doc = include_str!("../README.md")]
 #![deny(rustdoc::broken_intra_doc_links)]
+#![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod actor;
