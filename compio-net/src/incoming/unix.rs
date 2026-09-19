@@ -34,11 +34,10 @@ impl Stream for Incoming<'_> {
                 let res = ready!(op.poll_next_unpin(cx));
                 if let Some(BufResult(res, _)) = res {
                     let socket = if op.is_terminated() && res.is_ok() {
-                        let Some(op) = this.op.take() else {
-                            // SAFETY: op is guaranteed to be Some at this
-                            // point.
-                            unsafe { std::hint::unreachable_unchecked() }
-                        };
+                        let op = this
+                            .op
+                            .take()
+                            .expect("op is guaranteed to be Some at this point");
                         op.try_take()
                             .map_err(|_| ())
                             .expect("AcceptMulti has not completed")

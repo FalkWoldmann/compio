@@ -576,9 +576,22 @@ pub struct ProactorBuilder {
     buffer_pool_allocator: BufferAlloc,
 }
 
-// SAFETY: `RawFd` is thread safe.
+// On unix `RawFd` is an `i32` and `ProactorBuilder` is `Send + Sync` on its
+// own, so the auto traits are left to the compiler there: that way a future
+// field that really isn't thread safe is caught instead of being papered over.
+// On windows `RawFd` is a `HANDLE` (a raw pointer), which opts the struct out
+// of both auto traits even though the handle is thread safe.
+// SAFETY: every field is thread safe; the only `!Send`/`!Sync` one is the
+// `eventfd` handle, which is just an OS handle value.
+#[cfg(windows)]
 unsafe impl Send for ProactorBuilder {}
+#[cfg(windows)]
 unsafe impl Sync for ProactorBuilder {}
+
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<ProactorBuilder>();
+};
 
 impl Default for ProactorBuilder {
     fn default() -> Self {

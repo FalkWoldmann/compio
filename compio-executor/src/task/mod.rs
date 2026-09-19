@@ -193,9 +193,7 @@ impl Task {
             }),
         });
 
-        // SAFETY: The pointer was returned by `Box`, which guarantees that it's
-        // non-null and properly aligned.
-        let ptr = unsafe { NonNull::new_unchecked(Box::into_raw(alloc) as _) };
+        let ptr = NonNull::from(Box::leak(alloc)).cast();
 
         array::from_fn(|_| Task(ptr))
     }

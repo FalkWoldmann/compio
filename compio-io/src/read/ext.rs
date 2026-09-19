@@ -22,8 +22,9 @@ macro_rules! read_scalar {
                 const LEN: usize = ::std::mem::size_of::<$t>();
                 let BufResult(res, buf) = self.read_exact(ArrayVec::<u8, LEN>::new()).await;
                 res?;
-                // SAFETY: We just checked that the buffer is the correct size
-                Ok($t::$be(unsafe { buf.into_inner_unchecked() }))
+                Ok($t::$be(
+                    buf.into_inner().expect("read_exact filled the buffer"),
+                ))
             }
 
             #[doc = concat!("Read a little endian `", stringify!($t), "` from the underlying reader.")]
@@ -33,8 +34,9 @@ macro_rules! read_scalar {
                 const LEN: usize = ::std::mem::size_of::<$t>();
                 let BufResult(res, buf) = self.read_exact(ArrayVec::<u8, LEN>::new()).await;
                 res?;
-                // SAFETY: We just checked that the buffer is the correct size
-                Ok($t::$le(unsafe { buf.into_inner_unchecked() }))
+                Ok($t::$le(
+                    buf.into_inner().expect("read_exact filled the buffer"),
+                ))
             }
         }
     };
@@ -127,8 +129,9 @@ fn after_read_to_string(res: io::Result<usize>, buf: Vec<u8>) -> BufResult<usize
                 let mut buf = err.into_bytes();
                 buf.clear();
 
-                // SAFETY: the buffer is empty
-                unsafe { String::from_utf8_unchecked(buf) }
+                // An empty buffer is always valid UTF-8, and this keeps the
+                // allocation instead of dropping it.
+                String::from_utf8(buf).expect("empty buffer is valid UTF-8")
             });
 
             BufResult(Err(err), buf)
