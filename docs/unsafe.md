@@ -215,20 +215,39 @@ the ASan profile is for.
 `RUSTFLAGS="--cfg loom"` under a dedicated nextest profile. That is good practice
 and the right crate to start with.
 
-The gap is `compio-signal/src/unix/half_lock.rs`. It is a hand-rolled lock-free
-reader/writer structure — `AtomicPtr` for the data, a generation counter, a
-two-slot reader-count array, and `Box::from_raw` reclamation once a slot drains —
-and it is reachable from a signal handler, where the tool box is deliberately
-tiny. It currently has **no tests of any kind**. It is precisely the shape loom
-exists to check: the correctness argument is entirely about interleavings and
-reclamation timing, and it cannot be established by reading. The file already
-carries a `cfg!(not(miri))` guard around its spin loop, so the need was
-anticipated; the models were just never written.
+The gap is `compio-signal/src/unix/half_lock.rs`: a lock-free reader/writer
+structure — `AtomicPtr` for the data, a generation counter, a two-slot
+reader-count array, and `Box::from_raw` reclamation once a slot drains —
+reachable from a signal handler, where the tool box is deliberately tiny. It has
+**no tests of any kind**, and its correctness argument is entirely about
+interleavings and reclamation timing, which cannot be established by reading. The
+file already carries a `cfg!(not(miri))` guard around its spin loop, so the need
+was anticipated; the models were just never written.
 
-Its module docs note that everything uses `SeqCst` conservatively, with comments
-recording which weaker ordering should suffice. Those comments are exactly the
-hypotheses loom could confirm before anyone acts on them — a loom model is the
-precondition for that optimization, not a follow-up to it.
+Before writing those models, though, note that this file is **vendored**, not
+ours: its header points at `signal-hook-registry` at commit `7c8c5199`. It has
+since drifted locally (`YIELD_EVERY`, the `cfg!(not(miri))` guard,
+`is_multiple_of`). So the question is not only "what would loom prove here" but
+"should this code be here at all" — see the note on `signal-hook-registry` below.
+Writing loom models for a vendored copy we may want to delete is the wrong order
+of work; settle the dependency question first.
+
+**One structural note, not a tooling one.** The `unsafe` in `compio-signal` on
+unix is largely not compio's to own. `half_lock.rs` (260 lines) is a vendored
+copy of `signal-hook-registry`'s private internals, and `unix/mod.rs` (95 lines)
+re-implements that crate's public contract: a global copy-on-write registry of
+`(signal, handler)` pairs, a signal-safe read path, and restoring `SIG_DFL` when
+the last handler for a signal goes away. `signal-hook-registry` does exactly
+this, depends only on `libc`, and is what most of the ecosystem already uses.
+
+Depending on it would retire both files — roughly 355 lines, 8 `unsafe` blocks,
+and the only lock-free code in the workspace outside the executor. It is not a
+free swap: `signal-hook-registry` installs handlers with `sigaction` and chains
+to any previously registered handler, whereas compio calls `signal()` and
+replaces it. That is a real behaviour change, though arguably in the right
+direction — `signal()` has famously platform-dependent semantics, and chaining
+composes better with other libraries in the same process. It needs a maintainer
+decision rather than a drive-by patch.
 
 **Already in good shape:** ASan runs across the whole workspace with
 `-Zbuild-std` (`.github/workflows/ci_test_asan.yml`), with stress tests filtered
