@@ -165,6 +165,16 @@ impl SpawnMeta {
         Self(None)
     }
 
+    /// The location the task was spawned at, for the [flight recorder].
+    ///
+    /// `None` for an [`untracked`](Self::untracked) task.
+    ///
+    /// [flight recorder]: crate::dial9
+    #[inline]
+    pub(crate) fn loc(self) -> Option<&'static Location<'static>> {
+        self.0.map(|it| it.loc)
+    }
+
     /// The span of the task, or a disabled span if it is not to be reported.
     ///
     /// Entering a disabled span and asking for its id are both no-ops, so

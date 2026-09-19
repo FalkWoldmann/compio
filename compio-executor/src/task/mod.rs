@@ -212,6 +212,25 @@ impl Task {
         unsafe { &*(ptr as *const Header) }.state.inc();
     }
 
+    /// Report a wake of this task to the [flight recorder].
+    ///
+    /// This is a no-op unless the `dial9` feature is enabled.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must point to a live task allocation.
+    ///
+    /// [flight recorder]: crate::dial9
+    #[inline(always)]
+    pub(crate) unsafe fn record_dial9_wake(ptr: *const ()) {
+        crate::dial9::wake(unsafe { &*(ptr as *const Header) }.id);
+    }
+
+    /// The executor slot this task lives in.
+    pub(crate) fn id(&self) -> TaskId {
+        self.header().id
+    }
+
     /// Record a waker operation of this task for [`tokio-console`].
     ///
     /// This is a no-op unless the `console` feature is enabled.
