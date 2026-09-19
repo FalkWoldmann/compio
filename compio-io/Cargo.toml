@@ -35,6 +35,7 @@ windows-sys = { workspace = true, optional = true, features = [
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
 serde = { version = "1.0.219", features = ["derive"] }
+divan = { workspace = true }
 futures-executor = { workspace = true }
 
 [features]
@@ -52,6 +53,10 @@ codec-serde-json = ["dep:serde", "dep:serde_json", "dep:thiserror"]
 allocator_api = ["compio-buf/allocator_api"]
 read_buf = ["compio-buf/read_buf"]
 nightly = ["allocator_api", "read_buf"]
+
+[[bench]]
+name = "copy"
+harness = false
 
 [[test]]
 name = "compat"
