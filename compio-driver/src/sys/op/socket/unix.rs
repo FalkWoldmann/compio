@@ -1,6 +1,6 @@
 use std::{net::Shutdown, num::NonZeroU32};
 
-use compio_buf::{IoBufExt, IoBufMutExt};
+use compio_buf::IoBufMutExt;
 use rustix::{
     io::close,
     net::{
@@ -100,7 +100,20 @@ impl<T: IoVectoredBuf, C: IoBuf, S: AsFd> SendMsg<T, C, S> {
 
 impl<T: IoBufMut, S: AsFd> Recv<T, S> {
     pub(crate) fn call(&mut self) -> io::Result<usize> {
-        let (_, len) = recv(self.fd.as_fd(), self.buffer.as_uninit(), self.flags)?;
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit`.
+        // Contract: the caller must not de-initialize any byte below
+        // `buf_len()`.
+        // Evidence:
+        // - LOCAL FACT: the slice is handed to `recv`, which only ever writes
+        //   bytes the kernel received. A `recv` that writes N bytes leaves
+        //   `[0, N)` initialized and the rest untouched; it never writes
+        //   uninitialized-ness into the buffer.
+        let (_, len) = recv(
+            self.fd.as_fd(),
+            unsafe { self.buffer.as_uninit() },
+            self.flags,
+        )?;
 
         Ok(len)
     }
@@ -128,7 +141,20 @@ impl<S: AsFd> RecvFromHeader<S> {
 
 impl<T: IoBufMut, S: AsFd> RecvFrom<T, S> {
     pub(crate) fn call(&mut self) -> io::Result<usize> {
-        let (_, len, addr) = recvfrom(&self.header.fd, self.buffer.as_uninit(), self.header.flags)?;
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit`.
+        // Contract: the caller must not de-initialize any byte below
+        // `buf_len()`.
+        // Evidence:
+        // - LOCAL FACT: the slice is handed to `recvfrom`, which only ever writes
+        //   bytes the kernel received. A `recvfrom` that writes N bytes leaves
+        //   `[0, N)` initialized and the rest untouched; it never writes
+        //   uninitialized-ness into the buffer.
+        let (_, len, addr) = recvfrom(
+            &self.header.fd,
+            unsafe { self.buffer.as_uninit() },
+            self.header.flags,
+        )?;
 
         self.header.set_addr(addr);
 
@@ -462,7 +488,17 @@ impl<T: IoVectoredBufMut, C: IoBufMut, S> RecvMsg<T, C, S> {
         // As above: one `as_uninit()` call supplies both, so the kernel cannot
         // be handed a pointer from one buffer and a length from another. This
         // matches what the managed `RecvMsg` already does.
-        let control = self.control.as_uninit();
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit`.
+        // Contract: the caller must not de-initialize any byte below
+        // `buf_len()`.
+        // Evidence:
+        // - LOCAL FACT: only the address and length are taken; nothing is
+        //   written through the slice here.
+        // - TYPE FACT: what reaches `msg_control` is a raw pointer. The kernel
+        //   writes received control data into it, which initializes bytes and
+        //   never de-initializes them.
+        let control = unsafe { self.control.as_uninit() };
         ctrl.msg.msg_control = control.as_mut_ptr() as _;
         ctrl.msg.msg_controllen = control.len() as _;
     }

@@ -129,7 +129,16 @@ impl<B: IoBufMut> Framer<B> for LengthDelimited {
         let len = (*buf).buf_len();
 
         buf.reserve(self.length_field_len).expect("Reserve failed");
-        buf.copy_within(0..len, self.length_field_len); // Shift existing data
+        // SAFETY:
+        // Operation: `IoBufMutExt::copy_within(0..len, length_field_len)`.
+        // Contract: either every byte of the source range is initialized, or
+        // the destination lies at or above `buf_len()`.
+        // Evidence:
+        // - LOCAL FACT: `len` was read from `buf.buf_len()` before the
+        //   `reserve`, so `0..len` is exactly the initialized prefix and the
+        //   first disjunct holds. `reserve` does not shrink the buffer, so the
+        //   range is still in bounds.
+        unsafe { buf.copy_within(0..len, self.length_field_len) }; // Shift existing data
         unsafe { buf.advance_to(len + self.length_field_len) };
 
         let slice = buf.as_mut_slice();

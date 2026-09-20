@@ -20,7 +20,7 @@ the very safe methods that cannot be trusted.
 
 ## Bug 1 — `as_uninit` hands out initialized memory as `MaybeUninit`
 
-**Status: not fixed.** Structural; needs an API decision.
+**Status: fixed** by option 1 below — `as_uninit` is now an `unsafe fn`.
 
 `IoBufMut::as_uninit` returns `&mut [MaybeUninit<u8>]` covering the buffer's
 *whole* extent, including bytes that are already initialized. Safe code can
@@ -43,17 +43,41 @@ Confirmed for `[u8; N]`, `&mut [u8]` and `Vec<u8>` (the initialized prefix). By
 inspection the same applies to `BytesMut`, `ArrayVec`, `SmallVec` and `MmapMut`,
 whose impls expose full capacity the same way.
 
-### Options
+### The fix
 
-1. **Make `as_uninit` an `unsafe fn`** — the caller promises not to
-   de-initialize bytes below `buf_len()`. Smallest change; pushes the obligation
-   to where it can be stated.
-2. **Split the API** — return the initialized prefix as `&mut [u8]` and only the
-   spare capacity as `&mut [MaybeUninit<u8>]`. Sound by construction, but a
-   larger reshaping of the trait.
-3. **`unsafe trait` with a documented invariant** — pairs with bug 2's fix.
+Option 1 of the three considered: `IoBufMut::as_uninit` is an `unsafe fn` whose
+contract is that the caller must not de-initialize any byte in `[0, buf_len())`.
+Writing initialized values anywhere, and writing anything at or above
+`buf_len()`, stays allowed. (The alternatives were splitting the API so the
+initialized prefix comes back as `&mut [u8]`, and making the whole trait
+`unsafe`; clamping cannot help here.)
 
-Option 1 or 2 is needed; clamping cannot help here.
+Two sibling methods reached the same bytes and had to move with it:
+
+- `IoVectoredBufMut::iter_uninit_slice` is the vectored analogue and is
+  literally implemented as `.map(|buf| buf.as_uninit())`. Now `unsafe fn` with
+  the same contract, stated per yielded slice.
+- `IoBufMutExt::copy_within` was a *safe* method that could copy an
+  uninitialized source range over the initialized prefix — a third route to the
+  same UB, found while making the change. Now `unsafe fn`: either the source
+  range is initialized, or the destination lies at or above `buf_len()`.
+
+The derived accessors stay **safe**, because none of them can de-initialize:
+`buf_capacity` only reads a length, `buf_mut_ptr` and `compio-driver`'s
+`sys_slice_mut` hand out a raw pointer (writing through which is already
+`unsafe`), and `as_mut_slice`, `ensure_init` and `IoBufMutExt::uninit` return
+either `&mut [u8]`, which cannot express an uninitialized byte, or a view of the
+spare capacity only. So the safe surface is unchanged apart from the three
+methods above.
+
+### Cost
+
+Breaking for every implementor of `IoBufMut` and `IoVectoredBufMut`, and for
+every caller of the three methods. In-tree that was 25 implementations and
+about 30 call sites across `compio-buf`, `compio-driver`, `compio-io`,
+`compio-quic` and the tests. Every call site kept its behaviour; three in
+`compio-driver`'s tests were switched to the safe `buf_capacity` and
+`buf_mut_ptr` instead of taking `unsafe` at all.
 
 ## Bug 2 — two safe methods are assumed to agree
 
@@ -187,7 +211,10 @@ obligations, and resolve bug 1 by option 1 or 2 above:
 
 This is a breaking change for downstream implementors, which is the honest cost
 of the guarantee. The fixes already applied remove the reachable consequences of
-bug 2 without changing any public signature; bug 1 has no such mitigation.
+bug 2 without changing any public signature. Bug 1 had no such mitigation and is
+fixed by the signature change described above; what remains here is bug 2's root
+cause, which needs the implementor obligations to become a trait-level
+guarantee.
 
 ## Reproducers
 
@@ -195,3 +222,9 @@ Not in this repository: they trigger UB deliberately, and CI runs Miri.
 They are archived at
 <https://claude.ai/artifact/GnTpXa1LkxHcTmzfCynmrg> (private) and reproduce with
 `cargo miri run`.
+
+Bug 1's three reproducers — through `as_uninit`, through `iter_uninit_slice` and
+through `copy_within` — no longer compile against this branch. Each now fails
+with `E0133: call to unsafe function ... requires unsafe function or block`,
+which is the fix working: the UB is still expressible, but only by a caller who
+has written `unsafe` and taken on the contract.

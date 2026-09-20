@@ -31,7 +31,15 @@ impl AsyncRead for Repeat {
         &mut self,
         mut buf: B,
     ) -> compio_buf::BufResult<usize, B> {
-        let slice = buf.as_uninit();
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit`.
+        // Contract: the caller must not de-initialize any byte below
+        // `buf_len()`.
+        // Evidence:
+        // - LOCAL FACT: the only write is `fill(MaybeUninit::new(self.0))`,
+        //   which stores an initialized `u8` in every element. The contract
+        //   permits writing initialized values anywhere in the slice.
+        let slice = unsafe { buf.as_uninit() };
 
         let len = slice.len();
         slice.fill(MaybeUninit::new(self.0));
@@ -44,7 +52,14 @@ impl AsyncRead for Repeat {
 
     async fn read_vectored<V: IoVectoredBufMut>(&mut self, mut buf: V) -> BufResult<usize, V> {
         let mut len: usize = 0;
-        for slice in buf.iter_uninit_slice() {
+        // SAFETY:
+        // Operation: `IoVectoredBufMut::iter_uninit_slice`.
+        // Contract: no byte below any buffer's `buf_len()` may be
+        // de-initialized.
+        // Evidence:
+        // - LOCAL FACT: the only write is `fill(MaybeUninit::new(self.0))`,
+        //   which stores an initialized `u8` in every element.
+        for slice in unsafe { buf.iter_uninit_slice() } {
             len = len
                 .checked_add(slice.len())
                 .expect("total vectored buffer length overflow");

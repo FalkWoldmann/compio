@@ -204,9 +204,21 @@ impl<T: IoBuf> IoBuf for Slice<T> {
 }
 
 impl<T: IoBufMut> IoBufMut for Slice<T> {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let range = self.range();
-        let bytes = self.buffer.as_uninit();
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit` on the underlying buffer.
+        // Contract: no byte below the underlying buffer's `buf_len()` may be
+        // de-initialized.
+        // Evidence:
+        // - LOCAL FACT: only `bytes[range]` escapes, and `range` starts at
+        //   `self.begin`, so the bytes the underlying buffer holds below
+        //   `begin` are never handed to the caller at all.
+        // - PRECONDITION: within the returned view, this method's own contract
+        //   forbids de-initializing below `Slice::buf_len()`, which is the
+        //   underlying buffer's initialized bytes from `begin` onwards. The two
+        //   regions are the same bytes under the shift by `begin`.
+        let bytes = unsafe { self.buffer.as_uninit() };
         &mut bytes[range]
     }
 
@@ -356,13 +368,27 @@ impl<T: SetLen> SetLen for VectoredSlice<T> {
 }
 
 impl<T: IoVectoredBufMut> IoVectoredBufMut for VectoredSlice<T> {
-    fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
+    unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
         let mut offset = self.offset;
-        self.buf.iter_uninit_slice().skip(self.idx).map(move |buf| {
-            let ret = &mut buf[offset..];
-            offset = 0;
-            ret
-        })
+        // SAFETY:
+        // Operation: `IoVectoredBufMut::iter_uninit_slice` on the underlying
+        // vectored buffer.
+        // Contract: no byte below any buffer's `buf_len()` may be
+        // de-initialized.
+        // Evidence:
+        // - LOCAL FACT: the first `idx` slices are dropped by `skip` without
+        //   being written to, and each slice that does escape is narrowed to
+        //   `buf[offset..]`, so bytes before the slice's start are never
+        //   exposed.
+        // - PRECONDITION: this method carries the same per-slice contract for
+        //   everything it yields.
+        unsafe { self.buf.iter_uninit_slice() }
+            .skip(self.idx)
+            .map(move |buf| {
+                let ret = &mut buf[offset..];
+                offset = 0;
+                ret
+            })
     }
 }
 

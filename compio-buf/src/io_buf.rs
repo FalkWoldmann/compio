@@ -390,26 +390,40 @@ pub trait IoBufMut: IoBuf + SetLen {
     /// Get the full mutable slice of the buffer, including both initialized
     /// and uninitialized bytes.
     ///
+    /// The returned slice spans the buffer's whole extent, so its first
+    /// [`buf_len`](IoBuf::buf_len) elements alias bytes that are already
+    /// initialized and are still typed `u8`. That is why this method is
+    /// `unsafe`: the type system cannot stop a caller writing
+    /// `MaybeUninit::uninit()` over them, and reading those bytes back
+    /// afterwards is undefined behaviour.
+    ///
+    /// For the safe operations, prefer:
+    ///
+    /// * [`as_mut_slice`](IoBufMut::as_mut_slice) to read or write the
+    ///   initialized bytes — a `&mut [u8]` cannot de-initialize anything;
+    /// * [`buf_capacity`](IoBufMut::buf_capacity) and
+    ///   [`buf_mut_ptr`](IoBufMut::buf_mut_ptr) for the length and address;
+    /// * [`uninit`](IoBufMutExt::uninit) for a view of the *spare* capacity
+    ///   only, where writing `MaybeUninit::uninit()` is harmless.
+    ///
+    /// # Safety
+    ///
+    /// The caller must not de-initialize any byte in `[0, buf_len())` of the
+    /// returned slice: every element below that index must still hold an
+    /// initialized `u8` when the borrow ends. Writing initialized values, and
+    /// writing anything at all at or above `buf_len()`, is allowed.
+    ///
     /// # Implementor obligations
     ///
-    /// These are not currently enforced — this is a safe method on a safe
-    /// trait — but unsafe code in this crate and in `compio-driver` relies on
-    /// them. See `docs/soundness.md`.
+    /// These are not enforced by the signature, but unsafe code in this crate
+    /// and in `compio-driver` relies on them. See `docs/soundness.md`.
     ///
     /// 1. Successive calls must return the same pointer and length until the
     ///    buffer is mutated through `&mut self`. `buf_mut_ptr` and
     ///    `buf_capacity` call this separately and are used as a pair.
     /// 2. `as_init().len() <= as_uninit().len()`, and `as_init()` must address
     ///    a prefix of the same allocation.
-    ///
-    /// # Known unsoundness
-    ///
-    /// The returned slice covers bytes that are already initialized, so safe
-    /// code can write `MaybeUninit::uninit()` over them and then read them back
-    /// as `u8`. That is UB and no implementation can prevent it; fixing it
-    /// requires this method to become `unsafe`, or to stop exposing the
-    /// initialized prefix. Tracked in `docs/soundness.md`.
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>];
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>];
 
     /// Reserve additional capacity for the buffer.
     ///
@@ -459,7 +473,19 @@ pub trait IoBufMutExt: IoBufMut {
     /// zero-initialized.
     fn ensure_init(&mut self) -> &mut [u8] {
         let len = (*self).buf_len();
-        let slice = self.as_uninit();
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit`.
+        // Contract: the caller must not de-initialize any byte below
+        // `buf_len()`.
+        // Evidence:
+        // - LOCAL FACT: the only write below is `slice[len..].fill(..)`, which
+        //   starts at `len == buf_len()` and so touches no byte the contract
+        //   protects. The value written is `MaybeUninit::new(0)`, which is
+        //   initialized in any case.
+        // - TYPE FACT: the slice does not escape as `MaybeUninit`; it leaves
+        //   this function as `&mut [u8]`, through which no byte can be
+        //   de-initialized.
+        let slice = unsafe { self.as_uninit() };
         slice[len..].fill(MaybeUninit::new(0));
         // SAFETY:
         // Operation: `<[MaybeUninit<u8>]>::assume_init_mut` on the whole slice.
@@ -480,19 +506,46 @@ pub trait IoBufMutExt: IoBufMut {
     /// Total capacity of the buffer, including both initialized and
     /// uninitialized bytes.
     fn buf_capacity(&mut self) -> usize {
-        self.as_uninit().len()
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit`.
+        // Contract: the caller must not de-initialize any byte below
+        // `buf_len()`.
+        // Evidence:
+        // - LOCAL FACT: the slice is only asked for its length and is dropped
+        //   on the same expression. Nothing is written through it at all.
+        unsafe { self.as_uninit() }.len()
     }
 
     /// Get the raw mutable pointer to the buffer.
     fn buf_mut_ptr(&mut self) -> *mut MaybeUninit<u8> {
-        self.as_uninit().as_mut_ptr()
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit`.
+        // Contract: the caller must not de-initialize any byte below
+        // `buf_len()`.
+        // Evidence:
+        // - LOCAL FACT: the slice is only asked for its address. Nothing is
+        //   written through it here.
+        // - TYPE FACT: what escapes is a raw pointer, and every write through a
+        //   raw pointer is itself an `unsafe` operation whose caller carries
+        //   this obligation. This method does not hand out the ability to
+        //   de-initialize anything from safe code.
+        unsafe { self.as_uninit() }.as_mut_ptr()
     }
 
     /// Get the mutable slice of initialized bytes. The content is the same as
     /// [`IoBuf::as_init`], but mutable.
     fn as_mut_slice(&mut self) -> &mut [u8] {
         let len = (*self).buf_len();
-        let uninit = self.as_uninit();
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit`.
+        // Contract: the caller must not de-initialize any byte below
+        // `buf_len()`.
+        // Evidence:
+        // - LOCAL FACT: nothing is written through `uninit` in this function.
+        // - TYPE FACT: the prefix leaves as `&mut [u8]`, which cannot express
+        //   an uninitialized byte, so no caller of this safe method can
+        //   de-initialize through it either.
+        let uninit = unsafe { self.as_uninit() };
         // `IoBuf` and `IoBufMut` are safe traits, so `buf_len()` (which comes
         // from `as_init`) can exceed what `as_uninit` actually exposes.
         // Clamping keeps an inconsistent implementation merely wrong
@@ -575,12 +628,31 @@ pub trait IoBufMutExt: IoBufMut {
     /// This method will panic if the source or destination range is out of
     /// bounds.
     ///
+    /// # Safety
+    ///
+    /// Because `src` may name uninitialized bytes, this can move
+    /// uninitialized-ness *into* the initialized prefix. The caller must
+    /// ensure that it does not: either every byte of `src` is initialized, or
+    /// the destination range `dest..dest + src.len()` lies entirely at or
+    /// above [`buf_len`](IoBuf::buf_len).
+    ///
     /// [`slice::copy_within`]: https://doc.rust-lang.org/std/primitive.slice.html#method.copy_within
-    fn copy_within<R>(&mut self, src: R, dest: usize)
+    unsafe fn copy_within<R>(&mut self, src: R, dest: usize)
     where
         R: RangeBounds<usize>,
     {
-        self.as_uninit().copy_within(src, dest);
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit`, then `<[MaybeUninit<u8>]>::
+        // copy_within`.
+        // Contract: `as_uninit` requires that no byte below `buf_len()` be
+        // de-initialized.
+        // Evidence:
+        // - PRECONDITION: this method's own `# Safety` section requires that
+        //   the copy either carries initialized bytes or lands entirely at or
+        //   above `buf_len()`. In the first case every byte written is
+        //   initialized; in the second no byte below `buf_len()` is written.
+        //   Either way the callee's obligation holds.
+        unsafe { self.as_uninit() }.copy_within(src, dest);
     }
 
     /// Returns an [`Uninit`], which is a [`Slice`] that only exposes
@@ -636,8 +708,17 @@ pub trait IoBufMutExt: IoBufMut {
 impl<B: IoBufMut + ?Sized> IoBufMutExt for B {}
 
 impl<B: IoBufMut + ?Sized> IoBufMut for &'static mut B {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
-        (**self).as_uninit()
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit` on the wrapped buffer.
+        // Contract: the caller must not de-initialize any byte below that
+        // buffer's `buf_len()`.
+        // Evidence:
+        // - PRECONDITION: this method carries the identical contract, and the
+        //   wrapper exposes the wrapped buffer's bytes unchanged, at the same
+        //   indices. So the caller's promise is exactly the promise this call
+        //   needs, with nothing added or relaxed.
+        unsafe { (**self).as_uninit() }
     }
 
     fn reserve(&mut self, len: usize) -> Result<(), ReserveError> {
@@ -652,8 +733,17 @@ impl<B: IoBufMut + ?Sized> IoBufMut for &'static mut B {
 impl<B: IoBufMut + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBufMut
     for t_alloc!(Box, B, A)
 {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
-        (**self).as_uninit()
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit` on the wrapped buffer.
+        // Contract: the caller must not de-initialize any byte below that
+        // buffer's `buf_len()`.
+        // Evidence:
+        // - PRECONDITION: this method carries the identical contract, and the
+        //   wrapper exposes the wrapped buffer's bytes unchanged, at the same
+        //   indices. So the caller's promise is exactly the promise this call
+        //   needs, with nothing added or relaxed.
+        unsafe { (**self).as_uninit() }
     }
 
     fn reserve(&mut self, len: usize) -> Result<(), ReserveError> {
@@ -666,7 +756,7 @@ impl<B: IoBufMut + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'sta
 }
 
 impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBufMut for t_alloc!(Vec, u8, A) {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         let cap = self.capacity();
         // SAFETY:
@@ -720,7 +810,7 @@ impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBufMut for t_al
 }
 
 impl IoBufMut for [u8] {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         let len = self.len();
         // SAFETY:
@@ -747,7 +837,7 @@ impl IoBufMut for [u8] {
 }
 
 impl<const N: usize> IoBufMut for [u8; N] {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         // SAFETY:
         // Operation: `core::slice::from_raw_parts_mut::<MaybeUninit<u8>>(ptr,
@@ -774,7 +864,7 @@ impl<const N: usize> IoBufMut for [u8; N] {
 
 #[cfg(feature = "bytes")]
 impl IoBufMut for bytes::BytesMut {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         let cap = self.capacity();
         // SAFETY:
@@ -824,7 +914,7 @@ impl IoBufMut for bytes::BytesMut {
 
 #[cfg(feature = "read_buf")]
 impl IoBufMut for std::io::BorrowedBuf<'static, u8> {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let total_cap = self.capacity();
 
         // SAFETY:
@@ -846,7 +936,7 @@ impl IoBufMut for std::io::BorrowedBuf<'static, u8> {
 
 #[cfg(feature = "arrayvec")]
 impl<const N: usize> IoBufMut for arrayvec::ArrayVec<u8, N> {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         // SAFETY:
         // Operation: `core::slice::from_raw_parts_mut::<MaybeUninit<u8>>(ptr,
@@ -876,7 +966,7 @@ impl<const N: usize> IoBufMut for smallvec::SmallVec<[u8; N]>
 where
     [u8; N]: smallvec::Array<Item = u8>,
 {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         let cap = self.capacity();
         // SAFETY:
@@ -933,7 +1023,7 @@ where
 
 #[cfg(feature = "memmap2")]
 impl IoBufMut for memmap2::MmapMut {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         // SAFETY:
         // Operation: `core::mem::transmute::<&mut [u8], &mut
         // [MaybeUninit<u8>]>`. Contract: source and destination must
@@ -1433,7 +1523,7 @@ mod soundness_tests {
     }
 
     impl IoBufMut for Inconsistent {
-        fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+        unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
             &mut self.storage
         }
     }

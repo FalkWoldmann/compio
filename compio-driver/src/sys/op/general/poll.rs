@@ -19,7 +19,21 @@ unsafe impl<T: IoBufMut, S: AsFd> OpCode for ReadAt<T, S> {
 
     fn operate(&mut self, _: &mut Self::Control) -> Poll<io::Result<usize>> {
         poll_io(|| {
-            pread(self.fd.as_fd(), self.buffer.as_uninit(), self.offset).map(|(init, _)| init.len())
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit`.
+        // Contract: the caller must not de-initialize any byte below
+        // `buf_len()`.
+        // Evidence:
+        // - LOCAL FACT: the slice is handed to `pread`, which only ever writes
+        //   bytes the kernel received. A `pread` that writes N bytes leaves
+        //   `[0, N)` initialized and the rest untouched; it never writes
+        //   uninitialized-ness into the buffer.
+            pread(
+                self.fd.as_fd(),
+                unsafe { self.buffer.as_uninit() },
+                self.offset,
+            )
+            .map(|(init, _)| init.len())
         })
     }
 }
@@ -96,7 +110,19 @@ unsafe impl<T: IoBufMut, S: AsFd> OpCode for Read<T, S> {
     }
 
     fn operate(&mut self, _: &mut Self::Control) -> Poll<io::Result<usize>> {
-        poll_io(|| read(self.fd.as_fd(), self.buffer.as_uninit()).map(|(init, _)| init.len()))
+        poll_io(|| {
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit`.
+        // Contract: the caller must not de-initialize any byte below
+        // `buf_len()`.
+        // Evidence:
+        // - LOCAL FACT: the slice is handed to `read`, which only ever writes
+        //   bytes the kernel received. A `read` that writes N bytes leaves
+        //   `[0, N)` initialized and the rest untouched; it never writes
+        //   uninitialized-ness into the buffer.
+            read(self.fd.as_fd(), unsafe { self.buffer.as_uninit() })
+                .map(|(init, _)| init.len())
+        })
     }
 }
 

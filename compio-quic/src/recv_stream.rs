@@ -530,7 +530,15 @@ impl From<ResetError> for io::Error {
 
 impl AsyncRead for RecvStream {
     async fn read<B: IoBufMut>(&mut self, mut buf: B) -> BufResult<usize, B> {
-        let res = poll_fn(|cx| self.poll_read_uninit(cx, buf.as_uninit()))
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit`.
+        // Contract: the caller must not de-initialize any byte below
+        // `buf_len()`.
+        // Evidence:
+        // - LOCAL FACT: `poll_read_uninit` copies received stream bytes into
+        //   the slice, which initializes what it writes and leaves the rest
+        //   untouched. It never stores `MaybeUninit::uninit()`.
+        let res = poll_fn(|cx| self.poll_read_uninit(cx, unsafe { buf.as_uninit() }))
             .await
             .inspect(|&n| unsafe { buf.advance_to(n) })
             .map_err(Into::into);

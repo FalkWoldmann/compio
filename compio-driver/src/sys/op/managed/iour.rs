@@ -345,7 +345,10 @@ unsafe impl<C: IoBufMut, S: AsFd> OpCode for RecvMsgManaged<C, S> {
 
     unsafe fn init(&mut self, ctrl: &mut Self::Control) {
         unsafe { self.op.init(ctrl) };
-        let slice = self.control.as_uninit();
+        // SAFETY: as for the unmanaged `RecvMsg` path - only the address and
+        // length are taken, and the kernel writing control data into them
+        // initializes bytes rather than de-initializing any.
+        let slice = unsafe { self.control.as_uninit() };
         ctrl.msg.msg_control = slice.as_mut_ptr() as _;
         ctrl.msg.msg_controllen = slice.len() as _;
     }

@@ -43,9 +43,20 @@ impl<T: IoBuf> IoBuf for Uninit<T> {
 }
 
 impl<T: IoBufMut> IoBufMut for Uninit<T> {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let len = (*self).buf_len();
-        &mut self.0.as_uninit()[len..]
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit` on the wrapped buffer.
+        // Contract: no byte below the wrapped buffer's `buf_len()` may be
+        // de-initialized.
+        // Evidence:
+        // - LOCAL FACT: only `[len..]` escapes, where `len` is that same
+        //   `buf_len()`. The initialized prefix is sliced off and never reaches
+        //   the caller, so no call through this view can reach a byte the
+        //   contract protects. `Uninit` discharges the obligation itself rather
+        //   than forwarding it.
+        let all = unsafe { self.0.as_uninit() };
+        &mut all[len..]
     }
 
     fn reserve(&mut self, len: usize) -> Result<(), ReserveError> {

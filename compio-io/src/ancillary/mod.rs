@@ -212,8 +212,10 @@ impl<const N: usize> SetLen for AncillaryBuf<N> {
 }
 
 impl<const N: usize> IoBufMut for AncillaryBuf<N> {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
-        self.inner.as_uninit()
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+        // SAFETY: the wrapper exposes the inner array's bytes unchanged at the
+        // same indices, so this method's contract is the callee's verbatim.
+        unsafe { self.inner.as_uninit() }
     }
 }
 

@@ -115,7 +115,18 @@ pub(crate) trait IoBufMutExt: IoBufMut {
     ///
     /// This will include uninitialized memory.
     fn sys_slice_mut(&mut self) -> SysSlice {
-        SysSlice::from_uninit(self.as_uninit())
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit`.
+        // Contract: the caller must not de-initialize any byte below
+        // `buf_len()`.
+        // Evidence:
+        // - LOCAL FACT: nothing is written through the slice here; only its
+        //   address and length are taken.
+        // - TYPE FACT: `SysSlice` is a raw pointer and a length. Every write
+        //   through one is an `unsafe` operation carrying this obligation, so
+        //   this method hands out no way to de-initialize from safe code - the
+        //   same reasoning as `IoBufMut::buf_mut_ptr`.
+        SysSlice::from_uninit(unsafe { self.as_uninit() })
     }
 }
 
@@ -133,7 +144,9 @@ impl<T: IoVectoredBuf + ?Sized> IoVectoredBufExt for T {}
 pub(crate) trait IoVectoredBufMutExt: IoVectoredBufMut {
     /// Convert a pinned [`IoVectoredBufMut`] into a vector of [`SysSlice`]s.
     fn sys_slices_mut(&mut self) -> Vec<SysSlice> {
-        self.iter_uninit_slice()
+        // SAFETY: as for `sys_slice_mut` above - nothing is written through
+        // the slices, and what escapes is a raw pointer and a length.
+        unsafe { self.iter_uninit_slice() }
             .map(SysSlice::from_uninit)
             .collect()
     }

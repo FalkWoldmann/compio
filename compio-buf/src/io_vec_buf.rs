@@ -143,11 +143,30 @@ impl IoVectoredBuf for () {
 /// A trait for mutable vectored buffers.
 pub trait IoVectoredBufMut: IoVectoredBuf + SetLen {
     /// An iterator of maybe uninitialized slice of the buffers.
-    fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]>;
+    ///
+    /// Each yielded slice spans one buffer's whole extent, initialized prefix
+    /// included, exactly as [`IoBufMut::as_uninit`] does — and is `unsafe` for
+    /// the same reason.
+    ///
+    /// # Safety
+    ///
+    /// For each yielded slice, the caller must not de-initialize any byte
+    /// below that buffer's own `buf_len()`. Writing initialized values, and
+    /// writing anything at or above `buf_len()`, is allowed.
+    unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]>;
 
     /// The total capacity of all buffers.
     fn total_capacity(&mut self) -> usize {
-        self.iter_uninit_slice().map(|buf| buf.len()).sum()
+        // SAFETY:
+        // Operation: `IoVectoredBufMut::iter_uninit_slice`.
+        // Contract: no byte below any buffer's `buf_len()` may be
+        // de-initialized.
+        // Evidence:
+        // - LOCAL FACT: each slice is only asked for its length and dropped.
+        //   Nothing is written through any of them.
+        unsafe { self.iter_uninit_slice() }
+            .map(|buf| buf.len())
+            .sum()
     }
 
     /// Get an owned view of the vectored buffer.
@@ -184,7 +203,14 @@ pub trait IoVectoredBufMut: IoVectoredBuf + SetLen {
         let mut offset = begin;
         let mut idx = 0;
 
-        for b in self.iter_uninit_slice() {
+        // SAFETY:
+        // Operation: `IoVectoredBufMut::iter_uninit_slice`.
+        // Contract: no byte below any buffer's `buf_len()` may be
+        // de-initialized.
+        // Evidence:
+        // - LOCAL FACT: the loop reads each slice's length to locate `begin`
+        //   and writes through none of them.
+        for b in unsafe { self.iter_uninit_slice() } {
             let len = b.len();
             if len > offset {
                 break;
@@ -198,29 +224,61 @@ pub trait IoVectoredBufMut: IoVectoredBuf + SetLen {
 }
 
 impl<T: IoBufMut> IoVectoredBufMut for &'static mut [T] {
-    fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
-        self.iter_mut().map(|buf| buf.as_uninit())
+    unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit` on each element.
+        // Contract: the caller must not de-initialize any byte below that
+        // element's own `buf_len()`.
+        // Evidence:
+        // - PRECONDITION: this method carries the identical contract, stated
+        //   per yielded slice, and each yielded slice is one element's own at
+        //   that element's own indices. The promise transfers verbatim.
+        self.iter_mut().map(|buf| unsafe { buf.as_uninit() })
     }
 }
 
 impl<T: IoBufMut, const N: usize> IoVectoredBufMut for [T; N] {
-    fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
-        self.iter_mut().map(|buf| buf.as_uninit())
+    unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit` on each element.
+        // Contract: the caller must not de-initialize any byte below that
+        // element's own `buf_len()`.
+        // Evidence:
+        // - PRECONDITION: this method carries the identical contract, stated
+        //   per yielded slice, and each yielded slice is one element's own at
+        //   that element's own indices. The promise transfers verbatim.
+        self.iter_mut().map(|buf| unsafe { buf.as_uninit() })
     }
 }
 
 impl<T: IoBufMut, #[cfg(feature = "allocator_api")] A: std::alloc::Allocator + 'static>
     IoVectoredBufMut for t_alloc!(Vec, T, A)
 {
-    fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
-        self.iter_mut().map(|buf| buf.as_uninit())
+    unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit` on each element.
+        // Contract: the caller must not de-initialize any byte below that
+        // element's own `buf_len()`.
+        // Evidence:
+        // - PRECONDITION: this method carries the identical contract, stated
+        //   per yielded slice, and each yielded slice is one element's own at
+        //   that element's own indices. The promise transfers verbatim.
+        self.iter_mut().map(|buf| unsafe { buf.as_uninit() })
     }
 }
 
 #[cfg(feature = "arrayvec")]
 impl<T: IoBufMut, const N: usize> IoVectoredBufMut for arrayvec::ArrayVec<T, N> {
-    fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
-        self.iter_mut().map(|buf| buf.as_uninit())
+    unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit` on each element.
+        // Contract: the caller must not de-initialize any byte below that
+        // element's own `buf_len()`.
+        // Evidence:
+        // - PRECONDITION: this method carries the identical contract, stated
+        //   per yielded slice, and each yielded slice is one element's own at
+        //   that element's own indices. The promise transfers verbatim.
+        self.iter_mut().map(|buf| unsafe { buf.as_uninit() })
     }
 }
 
@@ -229,26 +287,39 @@ impl<T: IoBufMut, const N: usize> IoVectoredBufMut for smallvec::SmallVec<[T; N]
 where
     [T; N]: smallvec::Array<Item = T>,
 {
-    fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
-        self.iter_mut().map(|buf| buf.as_uninit())
+    unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit` on each element.
+        // Contract: the caller must not de-initialize any byte below that
+        // element's own `buf_len()`.
+        // Evidence:
+        // - PRECONDITION: this method carries the identical contract, stated
+        //   per yielded slice, and each yielded slice is one element's own at
+        //   that element's own indices. The promise transfers verbatim.
+        self.iter_mut().map(|buf| unsafe { buf.as_uninit() })
     }
 }
 
 impl<T: IoBufMut, Rest: IoVectoredBufMut> IoVectoredBufMut for (T, Rest) {
-    fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
+    unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
         let (h, t) = self;
-        iter::once(h.as_uninit()).chain(t.iter_uninit_slice())
+        // SAFETY: the head's slice and the tail's slices are this tuple's own
+        // buffers at their own indices, so this method's per-slice contract is
+        // each callee's contract verbatim.
+        unsafe { iter::once(h.as_uninit()).chain(t.iter_uninit_slice()) }
     }
 }
 
 impl<T: IoBufMut> IoVectoredBufMut for (T,) {
-    fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
-        iter::once(self.0.as_uninit())
+    unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
+        // SAFETY: a one-tuple's only buffer is its element, so the contract
+        // transfers verbatim.
+        unsafe { iter::once(self.0.as_uninit()) }
     }
 }
 
 impl IoVectoredBufMut for () {
-    fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
+    unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
         iter::empty()
     }
 }
@@ -401,9 +472,16 @@ impl<T: IoVectoredBuf + SetLen> SetLen for VectoredBufIter<T> {
 }
 
 impl<T: IoVectoredBufMut> IoBufMut for VectoredBufIter<T> {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
-        self.buf
-            .iter_uninit_slice()
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+        // SAFETY:
+        // Operation: `IoVectoredBufMut::iter_uninit_slice`.
+        // Contract: no byte below any buffer's `buf_len()` may be
+        // de-initialized.
+        // Evidence:
+        // - PRECONDITION: this method carries the same contract for the one
+        //   slice it returns, which is the element at `index`, unmodified. The
+        //   other slices are dropped by `nth` without being written to.
+        unsafe { self.buf.iter_uninit_slice() }
             .nth(self.index)
             .expect("`index` should not exceed `len`")
     }
