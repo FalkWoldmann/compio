@@ -449,12 +449,26 @@ pub trait IoBufMutExt: IoBufMut {
     /// [`IoBuf::as_init`], but mutable.
     fn as_mut_slice(&mut self) -> &mut [u8] {
         let len = (*self).buf_len();
-        let ptr = (*self).buf_mut_ptr();
+        let uninit = self.as_uninit();
+        // `IoBuf` and `IoBufMut` are safe traits, so `buf_len()` (which comes
+        // from `as_init`) can exceed what `as_uninit` actually exposes. Clamp
+        // rather than trust it: an inconsistent implementation is then merely
+        // wrong, not unsound.
+        let n = len.min(uninit.len());
+
         // SAFETY:
-        // - lifetime of the returned slice is bounded by &mut self
-        // - bytes within `len` are guaranteed to be initialized
-        // - the pointer is derived from
-        unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, len) }
+        // Operation: `<[MaybeUninit<u8>]>::assume_init_mut` on `uninit[..n]`.
+        // Contract: every element of the slice must be initialized.
+        // Evidence:
+        // - LOCAL FACT: `n <= uninit.len()`, so the index cannot panic and the
+        //   slice lies wholly inside the one `as_uninit` returned.
+        // - LOCAL FACT: `n <= len`, and `len` is this buffer's initialized
+        //   prefix length, so `[0, n)` is within the initialized region.
+        // - TYPE FACT: `uninit` is borrowed from `&mut self` and no code runs
+        //   between that borrow and this call, so nothing can shorten it.
+        // Postcondition: the returned `&mut [u8]` aliases the buffer's
+        // initialized prefix for the lifetime of the `&mut self` borrow.
+        unsafe { uninit[..n].assume_init_mut() }
     }
 
     /// Extend the buffer by copying bytes from `src`.
@@ -1084,5 +1098,50 @@ mod test {
         let mut buf = [];
         let res = IoBufMutExt::extend_from_slice(&mut buf, b" ");
         assert!(res.is_err_and(|x| x.is_not_supported()));
+    }
+}
+
+#[cfg(test)]
+mod soundness_tests {
+    use std::mem::MaybeUninit;
+
+    use crate::*;
+
+    /// `IoBuf`/`IoBufMut` are safe traits, so an implementation can report a
+    /// longer initialized prefix than it actually exposes. `as_mut_slice` used
+    /// to build a slice from `buf_len()` and `as_uninit()`'s pointer, which put
+    /// the resulting `&mut [u8]` past the end of the allocation. It now clamps.
+    struct Inconsistent {
+        storage: [MaybeUninit<u8>; 8],
+        claimed: Vec<u8>,
+    }
+
+    impl IoBuf for Inconsistent {
+        fn as_init(&self) -> &[u8] {
+            &self.claimed
+        }
+    }
+
+    impl SetLen for Inconsistent {
+        unsafe fn set_len(&mut self, _len: usize) {}
+    }
+
+    impl IoBufMut for Inconsistent {
+        fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+            &mut self.storage
+        }
+    }
+
+    #[test]
+    fn as_mut_slice_is_bounded_by_the_real_buffer() {
+        let mut buf = Inconsistent {
+            storage: [MaybeUninit::new(0); 8],
+            claimed: vec![0; 1000],
+        };
+        assert_eq!(
+            buf.as_mut_slice().len(),
+            8,
+            "as_mut_slice must not exceed what as_uninit exposes"
+        );
     }
 }

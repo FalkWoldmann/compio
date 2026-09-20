@@ -427,8 +427,12 @@ impl<T: IoVectoredBuf, C: IoBuf, S> SendMsg<T, C, S> {
         }
         ctrl.msg.msg_iov = ctrl.slices.as_ptr() as _;
         ctrl.msg.msg_iovlen = ctrl.slices.len() as _;
-        ctrl.msg.msg_control = self.control.buf_ptr() as _;
-        ctrl.msg.msg_controllen = self.control.buf_len() as _;
+        // Pointer and length come from one `as_init()` call. `IoBuf` is a safe
+        // trait, so two separate calls are not obliged to describe the same
+        // buffer, and this pair goes straight to the kernel.
+        let control = self.control.as_init();
+        ctrl.msg.msg_control = control.as_ptr() as _;
+        ctrl.msg.msg_controllen = control.len() as _;
     }
 }
 
@@ -455,8 +459,12 @@ impl<T: IoVectoredBufMut, C: IoBufMut, S> RecvMsg<T, C, S> {
         ctrl.msg.msg_namelen = self.header.addr.size_of() as _;
         ctrl.msg.msg_iov = ctrl.slices.as_mut_ptr() as _;
         ctrl.msg.msg_iovlen = ctrl.slices.len() as _;
-        ctrl.msg.msg_control = self.control.buf_mut_ptr() as _;
-        ctrl.msg.msg_controllen = self.control.buf_capacity() as _;
+        // As above: one `as_uninit()` call supplies both, so the kernel cannot
+        // be handed a pointer from one buffer and a length from another. This
+        // matches what the managed `RecvMsg` already does.
+        let control = self.control.as_uninit();
+        ctrl.msg.msg_control = control.as_mut_ptr() as _;
+        ctrl.msg.msg_controllen = control.len() as _;
     }
 
     pub(crate) fn update_control(&mut self, control: &RecvMsgControl) {
