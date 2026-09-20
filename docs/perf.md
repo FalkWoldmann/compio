@@ -204,6 +204,97 @@ hypothesis rather than a hunch.
 - **`compio-buf` per-operation allocation.** The divan benches cover in-memory
   copies; they do not yet cover the buffer lifecycle across a completion.
 
+## Which allocator to use
+
+compio spawns one heap allocation per task and frees it on completion (measured
+above: exactly 1.00, ~150 bytes), and roughly a third of the instruction cost of
+spawning is the allocator. So the allocator choice matters more here than the
+remaining micro-optimisations do.
+
+**compio is a library and does not set a global allocator.** It must not: the
+choice belongs to the binary at the top of the dependency tree, and a library
+that forces one takes that away. What follows is guidance for applications, not
+a change to this repository.
+
+### Measurements
+
+Workload: spawn 1000 trivial tasks and drive them to completion — one allocation
+and one free per task, which is compio's real allocator traffic.
+
+Single-threaded, instruction counts under callgrind (deterministic):
+
+| allocator | instructions | vs glibc |
+| --------- | -----------: | -------: |
+| glibc | 715,566 | — |
+| **mimalloc** | **510,253** | **−28.7%** |
+| jemalloc | 695,990 | −2.7% |
+| snmalloc | *cannot run* | — |
+
+Single-threaded, wall clock, ns per spawn+complete (median of 101, 3 trials):
+
+| allocator | ns/op | vs glibc |
+| --------- | ----: | -------: |
+| glibc | 76.7 | — |
+| **mimalloc** | **65.8** | **−14%** |
+| jemalloc | 73.3 | −4% |
+| snmalloc | ~66 | −14% |
+
+Four threads, each with its own executor, ns per spawn+complete (median of 7
+trials of 200 reps):
+
+| allocator | ns/op | vs glibc |
+| --------- | ----: | -------: |
+| **snmalloc** | **18.6** | **−31%** |
+| **mimalloc** | **19.2** | **−29%** |
+| jemalloc | 22.5 | −17% |
+| glibc | 27.1 | — |
+
+### Recommendation: mimalloc
+
+snmalloc edges it out under concurrency, and they are within noise of each other,
+but **mimalloc is the better default for a compio application** — and for one
+reason that is specific to this project rather than general:
+
+**snmalloc cannot run under valgrind.** It aborts with SIGABRT, because it
+reserves address space in a way valgrind does not emulate. compio's own
+instruction-count benchmarks (`schedule_iai`) run under callgrind, so choosing
+snmalloc means giving up the CI-stable benchmark tooling described at the top of
+this document. mimalloc runs under valgrind fine, which is how the −28.7%
+instruction figure above was obtained at all.
+
+jemalloc is a distant third here. It is respectable and very consistent
+(22.1–23.6 across seven trials, the tightest spread of any of them), but it does
+not win on any axis measured.
+
+Adding it to an application is three lines:
+
+```toml
+[dependencies]
+mimalloc = "0.1"
+```
+
+```rust
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+```
+
+### Caveats worth reading before acting on this
+
+- **One machine, one container.** The *ranking* was stable across trials; the
+  magnitudes will not be. Re-measure on the target hardware.
+- **The multi-threaded harness was wrong twice before it was right.** The first
+  version created fresh threads every repetition, which charged jemalloc for
+  per-thread cache initialisation on each one and made it look ~80% worse than
+  glibc. The second used barriers and produced impossible figures (0.1 ns/op).
+  Only the third — threads created once, enough work each that creation is
+  negligible — produced coherent numbers. Treat any multi-threaded allocator
+  comparison, including this one, with suspicion until the harness is examined.
+- **This workload is allocation-heavy by construction.** An application whose
+  tasks do real I/O will spend proportionally less time in the allocator, so the
+  end-to-end win will be smaller than these numbers suggest.
+- **snmalloc showed one outlier** in single-threaded trials (77.6 against a
+  typical 66) that did not recur.
+
 ## A note on the numbers in this document
 
 Every figure here came from a run on one machine. Instruction counts are stable
