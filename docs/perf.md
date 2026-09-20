@@ -193,16 +193,57 @@ the next percent there will cost far more effort than the last thirteen did.
 Not yet measured — listed with the mechanism so the next person can start from a
 hypothesis rather than a hunch.
 
-- **Task allocation is the biggest single lever** (see above). One `Box` per
-  spawn, 35% of spawn cost. A free-list of `TaskAlloc` blocks sized by layout, or
-  an arena tied to executor lifetime, are the obvious shapes. Both interact with
-  the intrusive refcount, so neither is small.
+- **Driver submission batching** (`compio-driver`, io_uring SQ/CQ) has no
+  instruction-count benchmark. It is also the layer where syscall count, not
+  instruction count, dominates, so it needs a different measurement approach
+  before anything is attempted.
+- **`compio-buf` per-operation allocation.** The divan benches cover in-memory
+  copies; they do not yet cover the buffer lifecycle across a completion.
 - **Driver submission batching** (`compio-driver`, io_uring SQ/CQ) is untouched
   by this work and has no instruction-count benchmark. It is also the layer where
   syscall count, not instruction count, dominates — so it needs a different
   measurement approach than the executor benches.
 - **`compio-buf` per-operation allocation.** The divan benches cover in-memory
   copies; they do not yet cover the buffer lifecycle across a completion.
+
+## Closed: pooling task allocations
+
+This was listed as the biggest remaining lever, on the strength of the 35%
+`malloc` share above. It does not work, and it is worth recording why so nobody
+spends the effort again.
+
+**There is no redundant allocation to remove.** `compio-executor/tests/allocs.rs`
+counts allocations with a counting global allocator: spawning is **exactly 1.00
+allocations per task, ~150 bytes**. The 35% is one `TaskAlloc<F>` box, not a pile
+of avoidable ones. So the only available move is to stop returning the block to
+the allocator between tasks.
+
+**A thread-local cache is slower than the allocator.** Two variants were built
+and measured on `spawn_ready` n1000:
+
+| variant | instructions | vs baseline |
+| ------- | -----------: | ----------: |
+| baseline (no pool) | 524,182 | — |
+| single-slot `Cell` cache | 528,182 | +0.76% |
+| bounded `RefCell<Vec<_>>` cache, keyed by layout | 536,678 | +2.4% |
+
+Both lose. glibc's tcache already recycles a 150-byte block on a very short fast
+path, and a thread-local access plus a layout check costs more than it saves. The
+cheapest possible Rust-side cache — one slot, a `Cell`, no scan — still loses.
+
+**An executor-local pool would avoid the thread-local cost, and is unsound.**
+`Task::drop` stores null into the header's `shared` pointer before the reference
+count reaches zero, so the executor is already unreachable from `dealloc`. That
+nulling is not incidental: `wait_for_scheduling` only waits for scheduling that
+is already in flight, and its own comment says late wakers from other threads
+"will see the null pointer and return early". A task allocation can therefore
+outlive `Shared`, and a pool living in `Shared` would be a use-after-free on
+exactly the path the null is there to protect.
+
+What is left, if this is ever revisited, is changing the allocation rather than
+caching it: inline storage for small futures, so that no separate block is taken
+at all. That is a much larger change and should start from a measurement of how
+many real workloads have futures small enough to benefit.
 
 ## A note on the numbers in this document
 
