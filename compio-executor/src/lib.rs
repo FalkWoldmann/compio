@@ -214,8 +214,7 @@ impl Executor {
         self.shared().drain_sync(queue);
 
         for id in queue.iter_hot().take(self.config.max_interval as _) {
-            queue.make_cold(id);
-            let task = queue.take(id).expect("Task was not reset back");
+            let task = queue.start_run(id);
             let res = {
                 let _poll = dial9::poll_start(id);
                 unsafe { task.run() }
@@ -229,7 +228,7 @@ impl Executor {
                 queue.remove(id);
                 dial9::task_terminate(id);
             } else {
-                queue.reset(id, task);
+                queue.finish_run(id, task);
             }
         }
 

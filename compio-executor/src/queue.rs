@@ -52,7 +52,34 @@ struct Item {
     prev: Option<TaskId>,
     next: Option<TaskId>,
     task: Option<Task>,
-    is_hot: bool,
+    place: Place,
+}
+
+/// Where a task sits between polls.
+///
+/// A task used to be in one of the two lists at all times, including while it
+/// was being polled, which put it in the cold one. A wake arriving during its
+/// own poll — what every future that yields does — then had to walk it back out
+/// of the cold list and onto the tail of the hot one, so a poll-and-self-wake
+/// cycle paid for two full list migrations. [`Place::Running`] is the third
+/// state that removes one of them: the executor takes the task out of both
+/// lists for the duration of the poll, a wake that arrives meanwhile only
+/// records that it happened, and the tick links the task back into whichever
+/// list that answer names.
+///
+/// The one visible difference is where a self-woken task lands among the tasks
+/// woken during its own poll: it used to go to the hot tail at the moment of
+/// the wake, ahead of them, and now goes there when the poll returns, behind
+/// them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Place {
+    /// Linked into the hot list, waiting to be polled.
+    Hot,
+    /// Linked into the cold list, waiting to be woken.
+    Cold,
+    /// Held by the executor for a poll, in neither list. `woken` records
+    /// whether a wake arrived while it was.
+    Running { woken: bool },
 }
 
 #[derive(Debug)]
@@ -110,23 +137,41 @@ impl TaskQueue {
         self.hot_head().is_some()
     }
 
-    pub fn take(&self, key: TaskId) -> Option<Task> {
+    /// Take the task out for a poll: unlink it from the hot list and mark it
+    /// [`Place::Running`].
+    ///
+    /// Unlinking and taking share the lookup of the item, which the two calls
+    /// this replaced each paid for separately.
+    pub fn start_run(&self, key: TaskId) -> Task {
         unsafe {
             self.with_inner(|inner| {
-                inner
-                    .map
-                    .get_mut(key)
-                    .map(|item| item.task.take().expect("Task has already been taken"))
+                inner.unlink::<HOT>(key);
+                let item = inner.map.get_mut(key).expect("item exists");
+                item.place = Place::Running { woken: false };
+                item.task.take().expect("Task has already been taken")
             })
         }
     }
 
-    pub fn reset(&self, key: TaskId, task: Task) {
+    /// Put a task that returned `Pending` back, into the hot list if it was
+    /// woken during its poll and into the cold one otherwise.
+    pub fn finish_run(&self, key: TaskId, task: Task) {
         unsafe {
             self.with_inner(|inner| {
-                let place = inner.map.get_mut(key).expect("Invalid key");
-                debug_assert!(place.task.is_none(), "Task was not taken");
-                place.task = Some(task);
+                let item = inner.map.get_mut(key).expect("Invalid key");
+                debug_assert!(item.task.is_none(), "Task was not taken");
+                item.task = Some(task);
+
+                let woken = match item.place {
+                    Place::Running { woken } => woken,
+                    place => unreachable!("Task was not running: {place:?}"),
+                };
+
+                if woken {
+                    inner.link_tail::<HOT>(key);
+                } else {
+                    inner.link_tail::<COLD>(key);
+                }
             })
         }
     }
@@ -148,7 +193,7 @@ impl TaskQueue {
                         prev: None,
                         next: None,
                         task: Some(ptr),
-                        is_hot: true,
+                        place: Place::Hot,
                     }
                 });
                 inner.link_tail::<HOT>(key);
@@ -161,15 +206,11 @@ impl TaskQueue {
         unsafe { self.with_inner(|inner| inner.make_hot(key)) }
     }
 
-    pub fn make_cold(&self, key: TaskId) {
-        unsafe { self.with_inner(|inner| inner.make_cold(key)) }
-    }
-
     pub fn next_hot(&self, key: TaskId) -> Option<TaskId> {
         unsafe {
             self.with_inner(|inner| {
                 inner.map.get(key).and_then(|item| {
-                    debug_assert!(item.is_hot);
+                    debug_assert_eq!(item.place, Place::Hot);
                     item.next
                 })
             })
@@ -190,13 +231,12 @@ impl TaskQueue {
     pub fn remove(&self, key: TaskId) -> Option<Task> {
         unsafe {
             self.with_inner(|inner| {
-                let is_hot = inner.map.get(key)?.is_hot;
-
-                if is_hot {
-                    inner.unlink::<HOT>(key);
-                } else {
-                    inner.unlink::<COLD>(key);
-                };
+                match inner.map.get(key)?.place {
+                    Place::Hot => inner.unlink::<HOT>(key),
+                    Place::Cold => inner.unlink::<COLD>(key),
+                    // `start_run` already unlinked it.
+                    Place::Running { .. } => {}
+                }
 
                 inner.map.remove(key)?.task
             })
@@ -236,7 +276,7 @@ impl Inner {
         let item = self.map.get_mut(key).expect("item exists");
         item.prev = old_tail;
         item.next = None;
-        item.is_hot = HOT;
+        item.place = if HOT { Place::Hot } else { Place::Cold };
 
         if let Some(tail_key) = old_tail
             && let Some(tail_item) = self.map.get_mut(tail_key)
@@ -250,7 +290,7 @@ impl Inner {
 
         let (prev, next) = {
             let item = self.map.get(key).expect("item exists");
-            debug_assert_eq!(item.is_hot, HOT);
+            debug_assert_eq!(item.place, if HOT { Place::Hot } else { Place::Cold });
             (item.prev, item.next)
         };
 
@@ -274,27 +314,26 @@ impl Inner {
     }
 
     fn make_hot(&mut self, key: TaskId) {
-        let Some(item) = self.map.get(key) else {
+        let Some(item) = self.map.get_mut(key) else {
             return;
         };
 
-        if item.is_hot {
-            return;
+        match item.place {
+            // Already queued for a poll.
+            Place::Hot => return,
+            // Being polled right now: it is in neither list, so there is
+            // nothing to move. Recording that it was woken is enough, and
+            // `finish_run` then links it into the hot list instead of the cold
+            // one.
+            Place::Running { .. } => {
+                item.place = Place::Running { woken: true };
+                return;
+            }
+            Place::Cold => {}
         }
 
         self.unlink::<COLD>(key);
         self.link_tail::<HOT>(key);
-    }
-
-    fn make_cold(&mut self, key: TaskId) {
-        let Some(item) = self.map.get(key) else {
-            return;
-        };
-
-        debug_assert!(item.is_hot);
-
-        self.unlink::<HOT>(key);
-        self.link_tail::<COLD>(key);
     }
 }
 
