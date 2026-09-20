@@ -53,7 +53,7 @@ jobs:
         if: ${{ matrix.setup.target }}
         run: rustup target install ${{ matrix.setup.target }}
       - uses: taiki-e/install-action@nextest
-      - name: Test loom on ${{ matrix.setup.os }} nightly ${{ matrix.setup.target }}
+      - name: Miri and loom on ${{ matrix.setup.os }} nightly ${{ matrix.setup.target }}
         shell: bash
         run: |
           set -ex
@@ -67,6 +67,14 @@ jobs:
             --features console \
             --test executor \
             --test console
+
+          # compio-buf is pure-Rust pointer and MaybeUninit work with no
+          # syscalls, which is exactly what miri checks well, and every other
+          # crate builds on it. memmap2 is left out on purpose: its test opens a
+          # real file, which miri's isolation refuses.
+          cargo miri test \
+            -p compio-buf \
+            --features arrayvec,smallvec,bumpalo,bytes,nightly
 
           RUSTFLAGS="--cfg loom" \
           LOOM_LOCATION=1 \
