@@ -96,6 +96,37 @@ implementation, so they encode existing behaviour rather than the refactor:
 appears twice or in the wrong list, and that `head`/`tail` agree with the walk.
 The 5 loom models and Miri also pass.
 
+### A deeper variant exists: `Place::Running`
+
+A second approach lives on `bench-tooling-prototype`. A task used to be in one
+of the two lists at all times, *including while being polled*, which put it in
+the cold one. A wake arriving during its own poll — what every future that
+yields does — then walked it back out of cold and onto the hot tail, so a
+poll-and-self-wake cycle paid for two full list migrations. Adding a third
+state, `Place::Running`, takes the task out of both lists for the duration of
+the poll; a wake that arrives meanwhile only records that it happened.
+
+The two changes are complementary rather than competing: `Running`
+short-circuits self-wakes, while the fused relink pays off on genuine
+cold-to-hot moves. Measured on `local_wake` n1000:
+
+| variant | instructions | vs master |
+| ------- | -----------: | --------: |
+| master | 332,111 | — |
+| fused relink (this branch) | 287,063 | −13.6% |
+| `Place::Running` only | 284,994 | −14.2% |
+| both together | 281,994 | **−15.1%** |
+
+All three pass the 5 loom models and Miri.
+
+`Place::Running` is not on this branch because it costs more than instructions:
+it changes the executor's queue API (`take`/`reset` become
+`start_run`/`finish_run`) and it changes observable ordering — a self-woken task
+used to reach the hot tail at the moment of the wake, ahead of tasks woken
+during its own poll, and now arrives when the poll returns, behind them. That is
+defensible but it is a semantic decision, not a free win, so it is kept separate
+for review on its own terms.
+
 ### Rejected: inlining the link into `insert`
 
 `insert` calls `link_tail` after `insert_with_key`, which re-looks-up the slot it
