@@ -32,9 +32,9 @@ impl UnixAdapter {
 
             let efd = eventfd(0, EventfdFlags::CLOEXEC | EventfdFlags::NONBLOCK)?;
             let efd_raw = efd.as_raw_fd();
-            // SAFETY: the ring fd is borrowed from `runtime`, which outlives this
-            // call; the pointer is to the live local `efd_raw` and the count of 1
-            // matches it.
+            // SAFETY: the ring fd is borrowed from `runtime`, which outlives
+            // this call; the pointer is to the live local `efd_raw`
+            // and the count of 1 matches it.
             unsafe {
                 io_uring_register(
                     BorrowedFd::borrow_raw(runtime.as_raw_fd()),

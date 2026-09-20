@@ -102,7 +102,10 @@ signature requires.
 **Fixed** by clamping to the slice `as_uninit` actually returned, with a
 `debug_assert!` so an inconsistent implementation is loud rather than silently
 truncated. Regression tests cover both builds: the assertion in debug, the
-clamp — which is the soundness property — in release.
+clamp — which is the soundness property — in release. The release half is only
+actually reached because CI now runs the release profile too; until it did,
+the test for the soundness property was compiled out everywhere and the fix
+had no automated coverage at all.
 
 ### 2b. Successive `as_uninit` calls need not agree — reaches the kernel
 
@@ -122,6 +125,50 @@ syscall was deliberately not invoked.
 
 **Fixed** for both the `RecvMsg` and `SendMsg` paths by taking the pointer and
 length from a single call, which is what `managed/iour.rs` already did.
+
+### 2c. `reserve` and `extend_from_slice` trusted the same safe methods
+
+Found by reviewing the fix for bug 1, in code the fix had just touched.
+
+`IoBufMut::reserve`'s default implementation asked `self.buf_capacity() - init`,
+where `init` is `buf_len()`. Those two come from `as_uninit` and `as_init`
+respectively, which — this being a safe trait — need not agree. When
+`buf_len()` exceeds `buf_capacity()` the subtraction wraps, `reserve` reports
+capacity of about 1.8e19 bytes, and returns `Ok`.
+
+`extend_from_slice` then trusted that `Ok`: it formed
+`buf_mut_ptr().wrapping_add(init)` and `copy_nonoverlapping`'d into it. With
+`buf_len()` at 1000 over an 8-byte allocation, that writes 992 bytes past the
+end. Both methods are safe, so this was reachable with no `unsafe` written
+anywhere by the caller. Miri: *"attempting to access 4 bytes, but got
+alloc291+0x400 which is at or beyond the end of the allocation of size 32"*.
+
+The SAFETY comment on that `copy_nonoverlapping` asserted the postcondition
+"`reserve(len)` returned `Ok`, so the buffer has at least `init + len` bytes of
+capacity" — which is exactly the safe-method trust this document declares
+untrustworthy, written three functions below the clamp added for bug 2a. A
+proof-shaped comment is not a proof; this one named its premise and the premise
+was false.
+
+**Fixed** twice over: `reserve` saturates instead of wrapping, so a
+disagreement denies the reservation; and `extend_from_slice` no longer trusts
+`reserve` at all, taking its destination from a single `as_uninit()` call and
+bounding the write against that slice's real length. Regression tests for both
+run under Miri in release.
+
+### 2d. `AncillaryBuilder` re-derived a base pointer per push
+
+The same defect as 2b, in a file the 2b fix did not touch.
+`AncillaryBuilder::new` records a pointer and length from one `ensure_init()`
+call into `CMsgIter`, and `push` then re-derived the base with
+`buffer.buf_mut_ptr()` — a fresh `as_uninit()` call — on every message, while
+offsetting by a cursor computed against the *first* call's pointer. A buffer
+whose `as_uninit()` returns a different or shorter allocation on a later call
+writes a `cmsghdr` at an offset from the wrong base. `AncillaryBuf::builder`
+and `AncillaryBuilder::new` are public and safe, for any user `B: IoBufMut`.
+
+**Fixed** by capturing the base once in `new` and using that stored pointer in
+`push`, the same shape as the 2b fix.
 
 ## Severity
 
@@ -190,8 +237,13 @@ calls — has no prior report.
 ### Why these survived
 
 Upstream CI runs `cargo miri test` against `compio-executor` only. `compio-buf`
-has no Miri coverage, which is what `ci: run miri over compio-buf` on this
-branch adds.
+has no Miri coverage, which the `TestBuf` workflow on this branch adds. That
+workflow runs both profiles on purpose: the soundness properties here are the
+ones that must hold once `debug_assert!` is compiled out, and the debug
+assertions fire before the clamped path is reached, so a dev-profile run alone
+never executes them. It is also a separate workflow rather than a step in
+`TestExecutor`, whose `paths:` filter matches only `compio-executor` — a step
+added there would not have run on a `compio-buf` change at all.
 
 ## Recommended fix
 

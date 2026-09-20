@@ -40,8 +40,16 @@ discharged, the comment says so and points at `soundness.md` rather than
 asserting a conclusion that is not true.
 
 `compio-compat`, `compio-process` and `compio-dispatcher` still carry the
-weaker form: a sentence of intent rather than a proof. `compio-term` has no
-`unsafe` blocks left to document.
+weaker form: a sentence of intent rather than a proof.
+
+An earlier draft of this document claimed `compio-term` had no `unsafe` blocks
+left to document. That was false, and the way it was false is worth recording:
+the crate has none on Unix, so a Linux-only `cargo clippy` run reported the
+lint satisfied, while `compio-term` in fact had 12 undocumented blocks in its
+Windows console code, `compio-process` 4 plus an undocumented `unsafe impl`,
+and `compio-compat` 4. Enabling a `deny` lint on a crate whose `unsafe` is
+platform-gated says nothing until it is run for that platform. All 21 are now
+documented and verified with `cargo clippy --target x86_64-pc-windows-msvc`.
 
 ## Not reviewed
 

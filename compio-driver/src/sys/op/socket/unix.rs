@@ -89,7 +89,8 @@ impl<T: IoVectoredBuf, S: AsFd> SendToVectored<T, S> {
 impl<T: IoVectoredBuf, C: IoBuf, S: AsFd> SendMsg<T, C, S> {
     pub(crate) fn call(&mut self, control: &mut SendMsgControl) -> io::Result<usize> {
         // Both rustix and nix expose api that uses structured AncillaryBuffer
-        // building, no way to just throw in an ancillary buf. Fallback to libc here.
+        // building, no way to just throw in an ancillary buf. Fallback to libc
+        // here.
         syscall!(libc::sendmsg(
             self.fd.as_fd().as_raw_fd(),
             &control.msg,
@@ -106,8 +107,8 @@ impl<T: IoBufMut, S: AsFd> Recv<T, S> {
         // `buf_len()`.
         // Evidence:
         // - LOCAL FACT: the slice is handed to `recv`, which only ever writes
-        //   bytes the kernel received. A `recv` that writes N bytes leaves
-        //   `[0, N)` initialized and the rest untouched; it never writes
+        //   bytes the kernel received. A `recv` that writes N bytes leaves `[0,
+        //   N)` initialized and the rest untouched; it never writes
         //   uninitialized-ness into the buffer.
         let (_, len) = recv(
             self.fd.as_fd(),
@@ -146,9 +147,9 @@ impl<T: IoBufMut, S: AsFd> RecvFrom<T, S> {
         // Contract: the caller must not de-initialize any byte below
         // `buf_len()`.
         // Evidence:
-        // - LOCAL FACT: the slice is handed to `recvfrom`, which only ever writes
-        //   bytes the kernel received. A `recvfrom` that writes N bytes leaves
-        //   `[0, N)` initialized and the rest untouched; it never writes
+        // - LOCAL FACT: the slice is handed to `recvfrom`, which only ever
+        //   writes bytes the kernel received. A `recvfrom` that writes N bytes
+        //   leaves `[0, N)` initialized and the rest untouched; it never writes
         //   uninitialized-ness into the buffer.
         let (_, len, addr) = recvfrom(
             &self.header.fd,

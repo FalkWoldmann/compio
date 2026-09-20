@@ -144,7 +144,7 @@ fn buffer_pool_managed_read() {
 #[cfg(any(not(target_os = "linux"), feature = "polling"))]
 #[test]
 fn buffer_pool_buffer_capacity() {
-    use compio_buf::{IoBufMut, IoBufMutExt};
+    use compio_buf::IoBufMutExt;
 
     let mut driver = build_proactor(2, 8192);
 

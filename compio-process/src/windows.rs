@@ -27,6 +27,12 @@ impl WaitProcess {
     }
 }
 
+// SAFETY: `OpCode` requires the operation be safe to poll according to the
+// `OpType` it returns. This one returns `OpType::Event(handle)`, naming the
+// child's process handle, and `operate` is only ever called after that event
+// signals. The handle is kept alive by the `process::Child` this op owns, and
+// `operate` reads the exit code through it without retaining any pointer, so
+// there are no self-references for `init` to pin.
 unsafe impl OpCode for WaitProcess {
     type Control = ();
 
@@ -61,6 +67,9 @@ impl AsyncRead for ChildStdout {
         let fd = self.to_shared_fd();
         let op = Read::new(fd, buffer);
         let res = compio_runtime::submit(op).await.into_inner();
+        // SAFETY: the completed `Read` reported how many bytes it wrote into
+        // the buffer, so advancing to that length only covers initialized
+        // bytes.
         unsafe { res.map_advanced() }
     }
 }
@@ -76,6 +85,8 @@ impl AsyncReadManaged for ChildStdout {
             io::Result::Ok(rt.submit(op))
         })?
         .await;
+        // SAFETY: the managed read completed, so the pool slice it names is
+        // filled to the reported length.
         unsafe { res.take_buffer() }
     }
 }
@@ -85,6 +96,9 @@ impl AsyncRead for ChildStderr {
         let fd = self.to_shared_fd();
         let op = Read::new(fd, buffer);
         let res = compio_runtime::submit(op).await.into_inner();
+        // SAFETY: the completed `Read` reported how many bytes it wrote into
+        // the buffer, so advancing to that length only covers initialized
+        // bytes.
         unsafe { res.map_advanced() }
     }
 }
@@ -100,6 +114,8 @@ impl AsyncReadManaged for ChildStderr {
             io::Result::Ok(rt.submit(op))
         })?
         .await;
+        // SAFETY: the managed read completed, so the pool slice it names is
+        // filled to the reported length.
         unsafe { res.take_buffer() }
     }
 }

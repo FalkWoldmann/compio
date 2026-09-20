@@ -391,7 +391,7 @@ pub trait IoBufMut: IoBuf + SetLen {
     /// and uninitialized bytes.
     ///
     /// The returned slice spans the buffer's whole extent, so its first
-    /// [`buf_len`](IoBuf::buf_len) elements alias bytes that are already
+    /// [`buf_len`](IoBufExt::buf_len) elements alias bytes that are already
     /// initialized and are still typed `u8`. That is why this method is
     /// `unsafe`: the type system cannot stop a caller writing
     /// `MaybeUninit::uninit()` over them, and reading those bytes back
@@ -399,10 +399,10 @@ pub trait IoBufMut: IoBuf + SetLen {
     ///
     /// For the safe operations, prefer:
     ///
-    /// * [`as_mut_slice`](IoBufMut::as_mut_slice) to read or write the
+    /// * [`as_mut_slice`](IoBufMutExt::as_mut_slice) to read or write the
     ///   initialized bytes — a `&mut [u8]` cannot de-initialize anything;
-    /// * [`buf_capacity`](IoBufMut::buf_capacity) and
-    ///   [`buf_mut_ptr`](IoBufMut::buf_mut_ptr) for the length and address;
+    /// * [`buf_capacity`](IoBufMutExt::buf_capacity) and
+    ///   [`buf_mut_ptr`](IoBufMutExt::buf_mut_ptr) for the length and address;
     /// * [`uninit`](IoBufMutExt::uninit) for a view of the *spare* capacity
     ///   only, where writing `MaybeUninit::uninit()` is harmless.
     ///
@@ -440,7 +440,11 @@ pub trait IoBufMut: IoBuf + SetLen {
     /// [`Err(ReserveError::NotSupported)`]: ReserveError::NotSupported
     fn reserve(&mut self, len: usize) -> Result<(), ReserveError> {
         let init = (*self).buf_len();
-        if len <= self.buf_capacity() - init {
+        // `buf_capacity()` and `buf_len()` are safe methods on a trait anyone
+        // may implement, so they need not agree; a plain subtraction here
+        // wraps when they disagree and reports capacity that does not exist.
+        // Saturating makes a disagreement deny the reservation instead.
+        if len <= self.buf_capacity().saturating_sub(init) {
             return Ok(());
         }
         Err(ReserveError::NotSupported)
@@ -587,32 +591,46 @@ pub trait IoBufMutExt: IoBufMut {
         let len = src.len();
         let init = (*self).buf_len();
         self.reserve(len)?;
-        let ptr = self.buf_mut_ptr().wrapping_add(init);
+
+        // `reserve` returning `Ok` is not evidence of anything: it is a safe
+        // method, and its default impl only compares two other safe methods.
+        // Take the destination from a single `as_uninit()` call and bound the
+        // write against that slice's real length, so a buffer whose
+        // `buf_len()`/`buf_capacity()` disagree with it cannot make us write
+        // out of bounds.
+        //
+        // SAFETY: we only write initialized bytes, and only at or above
+        // `buf_len()`, so no byte in `[0, buf_len())` is de-initialized.
+        let uninit = unsafe { self.as_uninit() };
+        let Some(dst) = uninit.get_mut(init..).and_then(|t| t.get_mut(..len)) else {
+            return Err(ReserveError::NotSupported);
+        };
 
         unsafe {
             // SAFETY:
-            // Operation: `core::ptr::copy_nonoverlapping(src.as_ptr(), ptr,
-            // len)`. Contract: both pointers valid for `len` bytes
-            // (read and write respectively), both aligned, and the
-            // two regions must not overlap. Evidence:
-            // - POSTCONDITION: `reserve(len)` returned `Ok`, so the buffer has
-            //   at least `init + len` bytes of capacity and `ptr`, which is
-            //   `buf_mut_ptr() + init`, is valid for `len` writes within it.
+            // Operation: `core::ptr::copy_nonoverlapping(src.as_ptr(),
+            // dst.as_mut_ptr(), len)`. Contract: both pointers valid for `len`
+            // bytes (read and write respectively), both aligned, and the two
+            // regions must not overlap. Evidence:
+            // - TYPE FACT: `dst` is a live `&mut [MaybeUninit<u8>]` of length
+            //   exactly `len`, obtained by a checked slice of the buffer's own
+            //   uninit view, so it is valid for `len` writes.
             // - TYPE FACT: `src` is a live `&[u8]` of length `len`, so it is
             //   valid for that many reads.
             // - AXIOM: `u8` has alignment 1, so both pointers are aligned.
             // - TYPE FACT: `src` is borrowed immutably while `self` is borrowed
             //   mutably; the two cannot alias, so the regions are disjoint.
-            std::ptr::copy_nonoverlapping(src.as_ptr() as _, ptr, len);
+            std::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr() as *mut u8, len);
 
             // SAFETY:
             // Operation: `SetLenExt::advance_to(init + len)`.
             // Contract: `[buf_len(), init + len)` must be initialized and the
-            // new length must not exceed `as_uninit().len()`.
+            // new length must not exceed the buffer's uninit length.
             // Evidence:
             // - POSTCONDITION: the `copy_nonoverlapping` above initialized
             //   exactly `[init, init + len)`, and `init` was `buf_len()`.
-            // - POSTCONDITION: `reserve(len)` guaranteed the capacity.
+            // - POSTCONDITION: `dst` was carved out of `uninit` at range
+            //   `[init, init + len)`, so `init + len <= uninit.len()`.
             self.advance_to(init + len);
         }
 
@@ -634,7 +652,7 @@ pub trait IoBufMutExt: IoBufMut {
     /// uninitialized-ness *into* the initialized prefix. The caller must
     /// ensure that it does not: either every byte of `src` is initialized, or
     /// the destination range `dest..dest + src.len()` lies entirely at or
-    /// above [`buf_len`](IoBuf::buf_len).
+    /// above [`buf_len`](IoBufExt::buf_len).
     ///
     /// [`slice::copy_within`]: https://doc.rust-lang.org/std/primitive.slice.html#method.copy_within
     unsafe fn copy_within<R>(&mut self, src: R, dest: usize)
@@ -777,8 +795,9 @@ impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBufMut for t_al
         // - TYPE FACT: `ptr` is derived from `&mut self`, and the returned
         //   lifetime is tied to that borrow, so no other pointer may access the
         //   region while it lives.
-        // Not discharged: see this trait method's "Known unsoundness" — the
-        // caller may de-initialize bytes below `buf_len()` through the result.
+        // - CALLER CONTRACT: `as_uninit` is an `unsafe fn` whose `# Safety`
+        //   section forbids de-initializing any byte in `[0, buf_len())`, so
+        //   the initialized prefix stays initialized.
         unsafe { std::slice::from_raw_parts_mut(ptr, cap) }
     }
 
@@ -830,8 +849,9 @@ impl IoBufMut for [u8] {
         // - TYPE FACT: `ptr` is derived from `&mut self`, and the returned
         //   lifetime is tied to that borrow, so no other pointer may access the
         //   region while it lives.
-        // Not discharged: see this trait method's "Known unsoundness" — the
-        // caller may de-initialize bytes below `buf_len()` through the result.
+        // - CALLER CONTRACT: `as_uninit` is an `unsafe fn` whose `# Safety`
+        //   section forbids de-initializing any byte in `[0, buf_len())`, so
+        //   the initialized prefix stays initialized.
         unsafe { std::slice::from_raw_parts_mut(ptr, len) }
     }
 }
@@ -856,8 +876,9 @@ impl<const N: usize> IoBufMut for [u8; N] {
         // - TYPE FACT: `ptr` is derived from `&mut self`, and the returned
         //   lifetime is tied to that borrow, so no other pointer may access the
         //   region while it lives.
-        // Not discharged: see this trait method's "Known unsoundness" — the
-        // caller may de-initialize bytes below `buf_len()` through the result.
+        // - CALLER CONTRACT: `as_uninit` is an `unsafe fn` whose `# Safety`
+        //   section forbids de-initializing any byte in `[0, buf_len())`, so
+        //   the initialized prefix stays initialized.
         unsafe { std::slice::from_raw_parts_mut(ptr, N) }
     }
 }
@@ -884,8 +905,9 @@ impl IoBufMut for bytes::BytesMut {
         // - TYPE FACT: `ptr` is derived from `&mut self`, and the returned
         //   lifetime is tied to that borrow, so no other pointer may access the
         //   region while it lives.
-        // Not discharged: see this trait method's "Known unsoundness" — the
-        // caller may de-initialize bytes below `buf_len()` through the result.
+        // - CALLER CONTRACT: `as_uninit` is an `unsafe fn` whose `# Safety`
+        //   section forbids de-initializing any byte in `[0, buf_len())`, so
+        //   the initialized prefix stays initialized.
         unsafe { std::slice::from_raw_parts_mut(ptr, cap) }
     }
 
@@ -955,8 +977,9 @@ impl<const N: usize> IoBufMut for arrayvec::ArrayVec<u8, N> {
         // - TYPE FACT: `ptr` is derived from `&mut self`, and the returned
         //   lifetime is tied to that borrow, so no other pointer may access the
         //   region while it lives.
-        // Not discharged: see this trait method's "Known unsoundness" — the
-        // caller may de-initialize bytes below `buf_len()` through the result.
+        // - CALLER CONTRACT: `as_uninit` is an `unsafe fn` whose `# Safety`
+        //   section forbids de-initializing any byte in `[0, buf_len())`, so
+        //   the initialized prefix stays initialized.
         unsafe { std::slice::from_raw_parts_mut(ptr, N) }
     }
 }
@@ -986,8 +1009,9 @@ where
         // - TYPE FACT: `ptr` is derived from `&mut self`, and the returned
         //   lifetime is tied to that borrow, so no other pointer may access the
         //   region while it lives.
-        // Not discharged: see this trait method's "Known unsoundness" — the
-        // caller may de-initialize bytes below `buf_len()` through the result.
+        // - CALLER CONTRACT: `as_uninit` is an `unsafe fn` whose `# Safety`
+        //   section forbids de-initializing any byte in `[0, buf_len())`, so
+        //   the initialized prefix stays initialized.
         unsafe { std::slice::from_raw_parts_mut(ptr, cap) }
     }
 
@@ -1034,8 +1058,10 @@ impl IoBufMut for memmap2::MmapMut {
         //   their references the same size and metadata.
         // - AXIOM: every byte pattern is a valid `MaybeUninit<u8>`, so every
         //   `u8` in the source is valid at the destination type.
-        // Not discharged: see `as_uninit`'s "Known unsoundness" — the caller
-        // may write `MaybeUninit::uninit()` back over the mapping.
+        // - CALLER CONTRACT: `as_uninit` is an `unsafe fn` whose `# Safety`
+        //   section forbids de-initializing any byte in `[0, buf_len())`, so
+        //   the caller may not write `MaybeUninit::uninit()` back over the
+        //   mapping's initialized bytes.
         unsafe { std::mem::transmute(self.as_mut()) }
     }
 }
@@ -1461,6 +1487,9 @@ mod test {
         file.flush().unwrap();
         file.seek(SeekFrom::Start(0)).unwrap();
         {
+            // SAFETY: mapping a file is unsafe because another process may
+            // mutate it underneath the mapping. `file` is this test's own
+            // freshly created temporary, which nothing else has a handle to.
             let mmap = unsafe { MmapOptions::new().map(&file).unwrap() };
 
             let init_slice = mmap.as_init();
@@ -1468,6 +1497,8 @@ mod test {
         }
 
         {
+            // SAFETY: as above - the file is this test's own temporary and is
+            // not mapped or written by anything else.
             let mut mmap = unsafe { MmapOptions::new().map_mut(&file).unwrap() };
 
             let init_slice = mmap.as_mut_slice();
@@ -1556,5 +1587,66 @@ mod soundness_tests {
             8,
             "as_mut_slice must not exceed what as_uninit exposes"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests_disagree_extend {
+    use std::mem::MaybeUninit;
+
+    use crate::*;
+
+    /// A buffer whose two halves describe different memory: `as_init` reports
+    /// a real 1000-byte allocation, `as_uninit` a real 8-byte one. Both
+    /// slices are valid, so the type itself is not UB -- the two methods
+    /// simply disagree, which safe code is free to do.
+    struct Inconsistent {
+        init: Vec<u8>,
+        uninit: [u8; 8],
+    }
+
+    impl IoBuf for Inconsistent {
+        fn as_init(&self) -> &[u8] {
+            &self.init
+        }
+    }
+
+    impl SetLen for Inconsistent {
+        unsafe fn set_len(&mut self, _len: usize) {}
+    }
+
+    impl IoBufMut for Inconsistent {
+        unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+            // SAFETY: `self.uninit` is a live `[u8; 8]` borrowed mutably for
+            // the returned lifetime, and every `u8` is a valid
+            // `MaybeUninit<u8>`, so the 8-element slice is in bounds and
+            // correctly typed.
+            unsafe {
+                std::slice::from_raw_parts_mut(self.uninit.as_mut_ptr() as *mut MaybeUninit<u8>, 8)
+            }
+        }
+    }
+
+    /// `buf_len()` is 1000 and `buf_capacity()` is 8. The old
+    /// `buf_capacity() - init` wrapped to ~1.8e19, so `reserve` said Ok and
+    /// `extend_from_slice` wrote 992 bytes past an 8-byte allocation. It must
+    /// refuse instead. Entirely safe code: no `unsafe` at this call site.
+    #[test]
+    fn extend_from_slice_refuses_when_the_impls_disagree() {
+        let mut buf = Inconsistent {
+            init: vec![0; 1000],
+            uninit: [0; 8],
+        };
+        assert!(buf.extend_from_slice(b"abcd").is_err());
+    }
+
+    /// The same disagreement must not make `reserve` itself claim capacity.
+    #[test]
+    fn reserve_refuses_when_the_impls_disagree() {
+        let mut buf = Inconsistent {
+            init: vec![0; 1000],
+            uninit: [0; 8],
+        };
+        assert!(buf.reserve(4).is_err());
     }
 }

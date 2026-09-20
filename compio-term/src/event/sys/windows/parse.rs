@@ -38,24 +38,28 @@ impl Parser {
     pub(super) fn parse(&mut self, record: INPUT_RECORD) -> io::Result<Option<Event>> {
         let event = match u32::from(record.EventType) {
             KEY_EVENT => {
-                // The event tag determines the active INPUT_RECORD union field.
+                // SAFETY: the event tag determines the active INPUT_RECORD
+                // union field.
                 let record = unsafe { record.Event.KeyEvent };
                 self.parse_key(record)
             }
             MOUSE_EVENT => {
-                // The event tag determines the active INPUT_RECORD union field.
+                // SAFETY: the event tag determines the active INPUT_RECORD
+                // union field.
                 let record = unsafe { record.Event.MouseEvent };
                 let event = parse_mouse(record, self.buttons)?;
                 self.buttons = MouseButtons::from_state(record.dwButtonState);
                 event.map(Event::Mouse)
             }
             WINDOW_BUFFER_SIZE_EVENT => {
-                // The event tag determines the active INPUT_RECORD union field.
+                // SAFETY: the event tag determines the active INPUT_RECORD
+                // union field.
                 let size = unsafe { record.Event.WindowBufferSizeEvent }.dwSize;
                 Some(Event::Resize(size.X.max(0) as u16, size.Y.max(0) as u16))
             }
             FOCUS_EVENT => {
-                // The event tag determines the active INPUT_RECORD union field.
+                // SAFETY: the event tag determines the active INPUT_RECORD
+                // union field.
                 let focus = unsafe { record.Event.FocusEvent };
                 Some(if focus.bSetFocus == TRUE {
                     Event::FocusGained
@@ -97,8 +101,8 @@ fn parse_key(record: KEY_EVENT_RECORD) -> Option<WindowsKeyEvent> {
     let modifiers = modifiers(record.dwControlKeyState);
     let state = key_state(record.dwControlKeyState);
     let virtual_key = record.wVirtualKeyCode;
-    // The KEY_EVENT_RECORD layout makes UnicodeChar the active union field for
-    // W APIs.
+    // SAFETY: the KEY_EVENT_RECORD layout makes UnicodeChar the active union
+    // field for W APIs.
     let utf16 = unsafe { record.uChar.UnicodeChar };
 
     let alt_code = virtual_key == VK_MENU && record.bKeyDown == 0 && utf16 != 0;
@@ -168,11 +172,21 @@ fn unicode_key(
 fn character_for_key(record: KEY_EVENT_RECORD) -> Option<char> {
     let keyboard_state = [0_u8; 256];
     let mut utf16 = [0_u16; 16];
+    // SAFETY: FFI calls to `GetForegroundWindow`, `GetWindowThreadProcessId`
+    // and `GetKeyboardLayout`. None has a precondition beyond well-formed
+    // arguments: a null window is an accepted input to the second, whose null
+    // `lpdwProcessId` is documented as "do not return the process id", and a
+    // thread id that no longer exists makes the third return the default
+    // layout rather than misbehave.
     let layout = unsafe {
         let window = GetForegroundWindow();
         let thread = GetWindowThreadProcessId(window, std::ptr::null_mut());
         GetKeyboardLayout(thread)
     };
+    // SAFETY: FFI call to `ToUnicodeEx`. `keyboard_state` is a live 256-byte
+    // array, the size the API requires, and `utf16` is a live 16-element
+    // buffer whose length is passed as the matching count, so neither is
+    // written out of bounds.
     let count = unsafe {
         ToUnicodeEx(
             u32::from(record.wVirtualKeyCode),
@@ -318,11 +332,17 @@ fn parse_mouse(
 }
 
 fn relative_row(row: i16) -> io::Result<u16> {
+    // SAFETY: FFI call to `GetStdHandle` with a documented standard-handle
+    // constant. It has no precondition, and its result is checked for null and
+    // INVALID_HANDLE_VALUE below.
     let output = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
     if output.is_null() || output == INVALID_HANDLE_VALUE {
         return Err(io::Error::last_os_error());
     }
     let mut info = CONSOLE_SCREEN_BUFFER_INFO::default();
+    // SAFETY: FFI call to `GetConsoleScreenBufferInfo`. `output` was checked
+    // valid just above, and `info` is a live, fully initialized
+    // `CONSOLE_SCREEN_BUFFER_INFO` the API writes into.
     if unsafe { GetConsoleScreenBufferInfo(output, &mut info) } == 0 {
         return Err(io::Error::last_os_error());
     }

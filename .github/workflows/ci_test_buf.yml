@@ -1,0 +1,62 @@
+name: TestBuf
+
+on:
+  merge_group:
+    types: [checks_requested]
+  push:
+    branches:
+      - master
+    paths:
+      - 'compio-buf/**/*.rs'
+      - 'compio-buf/Cargo.toml'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/ci_test_buf.yml'
+  pull_request:
+    branches:
+      - master
+    paths:
+      - 'compio-buf/**/*.rs'
+      - 'compio-buf/Cargo.toml'
+      - 'Cargo.toml'
+      - 'rust-toolchain.toml'
+      - '.github/workflows/ci_test_buf.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+env:
+  RUST_BACKTRACE: 1
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # compio-buf is pure-Rust pointer and MaybeUninit work with no syscalls,
+  # which is exactly what miri checks well, and every other crate builds on
+  # it. Nothing here is platform-dependent, so one runner is enough.
+  test_buf:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup miri and rust-src
+        run: rustup component add miri rust-src
+      - name: Miri over compio-buf
+        shell: bash
+        run: |
+          set -ex
+
+          # memmap2 is left out on purpose: its test opens a real file, which
+          # miri's isolation refuses.
+          #
+          # Both profiles are run. The soundness properties these tests cover
+          # (the `as_mut_slice` clamp, the `extend_from_slice` bound) are what
+          # must hold once `debug_assert!` is compiled out, and the debug
+          # assertions fire before the clamp is reached, so a dev-profile run
+          # alone never executes them.
+          cargo miri test \
+            -p compio-buf \
+            --features arrayvec,smallvec,bumpalo,bytes,nightly
+
+          cargo miri test --release \
+            -p compio-buf \
+            --features arrayvec,smallvec,bumpalo,bytes,nightly
