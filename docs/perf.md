@@ -98,7 +98,8 @@ The 5 loom models and Miri also pass.
 
 ### A deeper variant exists: `Place::Running`
 
-A second approach lives on `bench-tooling-prototype`. A task used to be in one
+A second approach lives on `queue-place-running-prototype`, with the full
+comparison in [`queue-design.md`](./queue-design.md). A task used to be in one
 of the two lists at all times, *including while being polled*, which put it in
 the cold one. A wake arriving during its own poll — what every future that
 yields does — then walked it back out of cold and onto the hot tail, so a

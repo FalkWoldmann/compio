@@ -32,7 +32,7 @@ for id in queue.iter_hot().take(max_interval) {
 A task is in one of the two lists *at all times*, including while it is being
 polled — during its own poll it sits in cold.
 
-## Variant A — fuse the relink (`perf-work`)
+## Variant A — fuse the relink (on this branch)
 
 ### What it does
 
@@ -65,7 +65,7 @@ part is irreducible without changing the data structure.
   less obvious than `unlink` then `link_tail`, and the comment carries that
   weight.
 
-## Variant B — `Place::Running` (`bench-tooling-prototype`)
+## Variant B — `Place::Running` (`queue-place-running-prototype`)
 
 ### What it does
 
