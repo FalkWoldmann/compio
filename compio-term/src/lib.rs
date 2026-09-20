@@ -13,6 +13,8 @@
 //!
 //! [`io::AsyncWrite`]: compio_io::AsyncWrite
 
+// Every `unsafe` block in this crate carries a `// SAFETY:` comment.
+#![deny(clippy::undocumented_unsafe_blocks)]
 #![allow(unused_features)]
 #![warn(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]

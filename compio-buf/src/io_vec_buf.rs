@@ -267,6 +267,8 @@ impl<T: IoBufMut, Rest: IoVectoredBufMut> SetLen for (T, Rest) {
 
 impl<T: IoBufMut> SetLen for (T,) {
     unsafe fn set_len(&mut self, len: usize) {
+        // SAFETY: a one-tuple is just its element, so the caller's obligation
+        // applies to it unchanged.
         unsafe { self.0.set_len(len) };
     }
 }
@@ -345,6 +347,9 @@ impl<T: IoVectoredBuf + SetLen> SetLen for VectoredBufIter<T> {
     unsafe fn set_len(&mut self, len: usize) {
         self.filled = len;
 
+        // SAFETY: `total_filled` counts the buffers already consumed, so
+        // `total_filled + filled` is the same position in the underlying buffer
+        // that `len` names in this iterator's view.
         unsafe { self.buf.set_len(self.total_filled + self.filled) };
     }
 }

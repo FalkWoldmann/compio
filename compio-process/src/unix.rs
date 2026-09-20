@@ -25,6 +25,9 @@ impl AsyncRead for ChildStdout {
         let fd = self.to_shared_fd();
         let op = Read::new(fd, buffer);
         let res = compio_runtime::submit(op).await.into_inner();
+        // SAFETY: the completed `Read` reported how many bytes it wrote into
+        // the buffer, so advancing to that length only covers
+        // initialized bytes.
         unsafe { res.map_advanced() }
     }
 }
@@ -40,6 +43,8 @@ impl AsyncReadManaged for ChildStdout {
             io::Result::Ok(rt.submit(op))
         })?
         .await;
+        // SAFETY: the managed read completed, so the pool slice it names is
+        // filled to the reported length.
         unsafe { res.take_buffer() }
     }
 }
@@ -49,6 +54,8 @@ impl AsyncRead for ChildStderr {
         let fd = self.to_shared_fd();
         let op = Read::new(fd, buffer);
         let res = compio_runtime::submit(op).await.into_inner();
+        // SAFETY: as above - the completed `Read` reported the initialized
+        // length.
         unsafe { res.map_advanced() }
     }
 }
@@ -64,6 +71,8 @@ impl AsyncReadManaged for ChildStderr {
             io::Result::Ok(rt.submit(op))
         })?
         .await;
+        // SAFETY: as above - the managed read completed before the buffer is
+        // taken.
         unsafe { res.take_buffer() }
     }
 }

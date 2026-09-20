@@ -429,6 +429,8 @@ pub trait IoBufMutExt: IoBufMut {
         let len = (*self).buf_len();
         let slice = self.as_uninit();
         slice[len..].fill(MaybeUninit::new(0));
+        // SAFETY: `[..len]` is initialized by the `IoBufMut` contract and the
+        // tail was just filled with zeros, so the whole slice is initialized.
         unsafe { slice.assume_init_mut() }
     }
 
@@ -774,6 +776,8 @@ pub trait SetLenExt: SetLen {
     {
         let current_len = (*self).buf_len();
         let new_len = current_len.checked_add(len).expect("length overflow");
+        // SAFETY: the caller promised the bytes up to `new_len` are
+        // initialized; the checked add only rules out a wrapped length.
         unsafe { self.set_len(new_len) };
     }
 
@@ -790,6 +794,9 @@ pub trait SetLenExt: SetLen {
     {
         let current_len = (*self).buf_len();
         if len > current_len {
+            // SAFETY: forwarded unchanged - the caller promised `[buf_len(),
+            // len)` is initialized, and this only narrows that to
+            // the growing case.
             unsafe { self.set_len(len) };
         }
     }
@@ -807,6 +814,8 @@ pub trait SetLenExt: SetLen {
     {
         let current_len = (*self).total_len();
         if len > current_len {
+            // SAFETY: forwarded unchanged, as in `advance_to`, but over the
+            // vectored length.
             unsafe { self.set_len(len) };
         }
     }
@@ -826,6 +835,8 @@ impl<B: SetLen + ?Sized> SetLenExt for B {}
 
 impl<B: SetLen + ?Sized> SetLen for &'static mut B {
     unsafe fn set_len(&mut self, len: usize) {
+        // SAFETY: `**self` is the buffer being resized, so the caller's
+        // obligation transfers verbatim.
         unsafe { (**self).set_len(len) }
     }
 }
@@ -834,12 +845,17 @@ impl<B: SetLen + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'stati
     for t_alloc!(Box, B, A)
 {
     unsafe fn set_len(&mut self, len: usize) {
+        // SAFETY: `**self` is the buffer being resized, so the caller's
+        // obligation transfers verbatim.
         unsafe { (**self).set_len(len) }
     }
 }
 
 impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> SetLen for t_alloc!(Vec, u8, A) {
     unsafe fn set_len(&mut self, len: usize) {
+        // SAFETY: this is `Vec::set_len`, whose contract is the same one the
+        // caller has already met: `len <= capacity` and `[old_len, len)`
+        // initialized.
         unsafe { self.set_len(len) };
     }
 }
@@ -859,6 +875,8 @@ impl<const N: usize> SetLen for [u8; N] {
 #[cfg(feature = "bytes")]
 impl SetLen for bytes::BytesMut {
     unsafe fn set_len(&mut self, len: usize) {
+        // SAFETY: this is `BytesMut::set_len`, whose contract matches the one
+        // the caller has already met.
         unsafe { self.set_len(len) };
     }
 }
@@ -881,6 +899,8 @@ impl SetLen for std::io::BorrowedBuf<'static, u8> {
 impl<const N: usize> SetLen for arrayvec::ArrayVec<u8, N> {
     unsafe fn set_len(&mut self, len: usize) {
         if (**self).buf_len() < len {
+            // SAFETY: this is `ArrayVec::set_len`; `len` is only grown here,
+            // and the caller promised those bytes are initialized.
             unsafe { self.set_len(len) };
         }
     }
@@ -907,12 +927,17 @@ impl SetLen for memmap2::MmapMut {
 
 impl<T: IoBufMut> SetLen for [T] {
     unsafe fn set_len(&mut self, len: usize) {
+        // SAFETY: `default_set_len` distributes `len` across the sub-buffers,
+        // capping each at its own capacity, so no element is given a length its
+        // buffer cannot back.
         unsafe { default_set_len(self.iter_mut(), len) }
     }
 }
 
 impl<T: IoBufMut, const N: usize> SetLen for [T; N] {
     unsafe fn set_len(&mut self, len: usize) {
+        // SAFETY: as for `[T]` - `default_set_len` caps each element at its own
+        // capacity.
         unsafe { default_set_len(self.iter_mut(), len) }
     }
 }
@@ -921,6 +946,8 @@ impl<T: IoBufMut, #[cfg(feature = "allocator_api")] A: Allocator + 'static> SetL
     for t_alloc!(Vec, T, A)
 {
     unsafe fn set_len(&mut self, len: usize) {
+        // SAFETY: as for `[T]` - `default_set_len` caps each element at its own
+        // capacity.
         unsafe { default_set_len(self.iter_mut(), len) }
     }
 }
@@ -928,6 +955,7 @@ impl<T: IoBufMut, #[cfg(feature = "allocator_api")] A: Allocator + 'static> SetL
 #[cfg(feature = "arrayvec")]
 impl<T: IoBufMut, const N: usize> SetLen for arrayvec::ArrayVec<T, N> {
     unsafe fn set_len(&mut self, len: usize) {
+        // SAFETY: `default_set_len` caps each element at its own capacity.
         unsafe { default_set_len(self.iter_mut(), len) }
     }
 }
@@ -955,6 +983,8 @@ unsafe fn default_set_len<'a, B: IoBufMut>(
     while len > 0 {
         let Some(curr) = iter.next() else { return };
         let sub = (*curr).buf_capacity().min(len);
+        // SAFETY: `sub` is clamped to this buffer's capacity, and the caller
+        // promised that many bytes of it are initialized.
         unsafe { curr.set_len(sub) };
         len -= sub;
     }

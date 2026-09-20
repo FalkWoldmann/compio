@@ -210,6 +210,9 @@ impl<T: IoBufMut> IoBufMut for Slice<T> {
 
 impl<T: SetLen> SetLen for Slice<T> {
     unsafe fn set_len(&mut self, len: usize) {
+        // SAFETY: `begin` is the slice's offset into the buffer, so `begin +
+        // len` names the same byte in the buffer that `len` names in
+        // the slice.
         unsafe { self.buffer.set_len(self.begin + len) }
     }
 }
@@ -299,6 +302,8 @@ impl<T: IoVectoredBuf> IoVectoredBuf for VectoredSlice<T> {
 
 impl<T: SetLen> SetLen for VectoredSlice<T> {
     unsafe fn set_len(&mut self, len: usize) {
+        // SAFETY: `begin` is this slice's offset, so `begin + len` names the
+        // same position in the underlying vectored buffer.
         unsafe { self.buf.set_len(self.begin + len) }
     }
 }

@@ -59,6 +59,8 @@ impl<T: IoBufMut> IoBufMut for Uninit<T> {
 
 impl<T: SetLen + IoBuf> SetLen for Uninit<T> {
     unsafe fn set_len(&mut self, len: usize) {
+        // SAFETY: `Uninit` only narrows the view; the length it is given refers
+        // to the same buffer the inner `SetLen` resizes.
         unsafe {
             self.0.set_len(len);
         }

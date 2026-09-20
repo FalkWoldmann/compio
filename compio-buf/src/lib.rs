@@ -4,6 +4,9 @@
 //! crate defines [`IoBuf`] and [`IoBufMut`] traits which are implemented by
 //! buffer types that respect the safety contract.
 
+// Every `unsafe` block in this crate carries a `// SAFETY:` comment. It is the
+// foundation the rest of the workspace builds on, so keep it that way.
+#![deny(clippy::undocumented_unsafe_blocks)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(feature = "allocator_api", feature(allocator_api))]
 #![cfg_attr(feature = "read_buf", feature(read_buf, core_io_borrowed_buf))]
