@@ -1,72 +1,31 @@
 //! Unix-specific types for signal handling.
 
-use std::{io, sync::LazyLock};
+use std::io;
 
-mod half_lock;
-
-use nix::sys::signal::{self, SigHandler, Signal};
-use slab::Slab;
+use signal_hook_registry::{SigId, register, unregister};
 use synchrony::sync::async_flag::{AsyncFlag as Event, AsyncFlagHandle as EventHandle};
-
-use crate::unix::half_lock::HalfLock;
-
-static HANDLER: LazyLock<HalfLock<Slab<(Signal, EventHandle)>>> = LazyLock::new(HalfLock::default);
-
-extern "C" fn signal_handler(sig: i32) {
-    let Ok(sig) = Signal::try_from(sig) else {
-        return;
-    };
-    for handler in HANDLER
-        .read()
-        .iter()
-        .filter_map(|(_, (s, handler))| (sig == *s).then_some(handler))
-    {
-        handler.clone().notify();
-    }
-}
-
-fn register(sig: Signal, event: &Event) -> io::Result<usize> {
-    let handle = event.handle();
-    let mut guard = HANDLER.write();
-    let mut new = Slab::clone(&*guard);
-    let key = new.insert((sig, handle));
-    guard.store(new);
-    unsafe { signal::signal(sig, SigHandler::Handler(signal_handler)) }?;
-
-    Ok(key)
-}
-
-fn unregister(sig: Signal, key: usize) -> io::Result<()> {
-    let mut handler = HANDLER.write();
-    let mut new = Slab::clone(&*handler);
-    new.remove(key);
-    let need_uninit = new.iter().all(|(_, (s, _))| *s != sig);
-
-    if need_uninit {
-        unsafe { signal::signal(sig, SigHandler::SigDfl) }?;
-    }
-
-    handler.store(new);
-
-    Ok(())
-}
 
 /// A listener to unix signal event.
 #[derive(Debug)]
 struct SignalListener {
-    sig: Signal,
-    key: usize,
+    id: SigId,
     event: Option<Event>,
 }
 
 impl SignalListener {
     fn new(sig: i32) -> io::Result<Self> {
-        let sig = Signal::try_from(sig)?;
         let event = Event::new();
-        let key = register(sig, &event)?;
+        let handle: EventHandle = event.handle();
+
+        // SAFETY: the action runs inside a signal handler, so it must be
+        // async-signal-safe. `AsyncFlagHandle::notify` only performs atomic
+        // stores and a lock-free waker hand-off; it allocates nothing and takes
+        // no locks. This is the same constraint the previous hand-written
+        // handler operated under.
+        let id = unsafe { register(sig, move || handle.clone().notify()) }?;
+
         Ok(Self {
-            sig,
-            key,
+            id,
             event: Some(event),
         })
     }
@@ -82,7 +41,7 @@ impl SignalListener {
 
 impl Drop for SignalListener {
     fn drop(&mut self) {
-        _ = unregister(self.sig, self.key);
+        unregister(self.id);
     }
 }
 

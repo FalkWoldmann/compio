@@ -19,12 +19,12 @@ targets = [
 ]
 
 [dependencies]
-slab = { workspace = true }
 synchrony = { workspace = true, features = ["async_flag"] }
 
 # Windows specific dependencies
 [target.'cfg(windows)'.dependencies]
 once_cell = { workspace = true }
+slab = { workspace = true }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
     "Win32_System_Console",
@@ -33,9 +33,14 @@ windows-sys = { workspace = true, features = [
 # Unix specific dependencies
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true, features = ["signal"] }
+signal-hook-registry = { workspace = true }
 
 [dev-dependencies]
 futures-executor = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = { workspace = true }
+signal-hook-registry = { workspace = true }
 
 [features]
 # Nightly features
