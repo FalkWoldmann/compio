@@ -110,6 +110,65 @@ reallocates.
 The rule being broken in both cases is that safe code must not be able to cause
 undefined behaviour.
 
+## Prior art: this was fixed once and regressed
+
+Bug 1's root cause is not a new observation. It was raised as
+[#220](https://github.com/compio-rs/compio/issues/220), *"IoBuf should be a
+unsafe trait"*, in March 2024 — "the trait user can't guarantee ptr is valid,
+but implementer know how to make sure the ptr is valid" — and **accepted and
+fixed** two days later in `b7caef95`, *fix(buf): make IoBuf(Mut) unsafe*, which
+added:
+
+```rust
+/// # Safety
+///
+/// The implementer should ensure the pointer, len and capacity are valid, so
+/// that the returned slice of [`IoBuf::as_slice`] is valid.
+pub unsafe trait IoBuf: 'static {
+```
+
+[#555](https://github.com/compio-rs/compio/pull/555), *refactor(buf): better
+IoBuf* (merged December 2025, `65917da0`), removed it:
+
+```diff
+-pub unsafe trait IoBuf: 'static {
++pub trait IoBuf: 'static {
+-pub unsafe trait IoBufMut: IoBuf + SetBufInit {
++pub trait IoBufMut: IoBuf + SetBufInit {
+```
+
+That PR did not intend to drop the guarantee. Its description says `IoBuf`
+would instead require "a single `unsafe fn buffer(&self) -> IoBuffer`" — moving
+the obligation from the trait to one unsafe method, which would have been
+sound. **That method never landed.** `git log -S "unsafe fn buffer"` over
+`compio-buf` on master returns nothing; what merged was a safe
+`fn as_slice(&self) -> &[u8]`, later renamed `as_init`. So the refactor removed
+the marker and shipped without the replacement.
+
+The fix recommended below is therefore a restoration, not a new design.
+
+### Related, already accepted as bugs
+
+- [#581](https://github.com/compio-rs/compio/issues/581), *`map_advanced` is
+  unsound*, closed as completed: "If user (either by accident or on purpose)
+  passed in a not well-formed `BufResult` to `map_advanced`, uninitialized bytes
+  will be marked as initialized, hence UB." Same rule, different site — the
+  project has already treated a safe API trusting caller-supplied lengths as a
+  soundness bug.
+- [#1007](https://github.com/compio-rs/compio/issues/1007), *Stack overflow in
+  `IoBufMut` impl for `memmap2::MmapMut`*, closed as completed: `as_uninit`,
+  `as_mut_slice` and `buf_mut_ptr` were mutually recursive. That is the same
+  trio bug 2a lives in; their interaction has already caused one bug.
+
+Bug 2b — `msg_control` and `msg_controllen` taken from separate `as_uninit()`
+calls — has no prior report.
+
+### Why these survived
+
+Upstream CI runs `cargo miri test` against `compio-executor` only. `compio-buf`
+has no Miri coverage, which is what `ci: run miri over compio-buf` on this
+branch adds.
+
 ## Recommended fix
 
 Make `IoBuf` and `IoBufMut` `unsafe trait`s stating the implementor's
