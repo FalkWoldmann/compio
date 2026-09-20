@@ -285,6 +285,52 @@ impl Inner {
         }
     }
 
+    /// Neighbour fix-up half of [`unlink`], for callers that already read
+    /// `prev`/`next` and have rewritten the item's own links. Splitting it this
+    /// way is what lets the wake path touch `key`'s slot only once.
+    fn detach<const HOT: QueueMarker>(
+        &mut self,
+        key: TaskId,
+        prev: Option<TaskId>,
+        next: Option<TaskId>,
+    ) {
+        {
+            let list = if HOT { &mut self.hot } else { &mut self.cold };
+            if list.head == Some(key) {
+                list.head = next;
+            }
+            if list.tail == Some(key) {
+                list.tail = prev;
+            }
+        }
+        if let Some(prev_key) = prev
+            && let Some(prev_item) = self.map.get_mut(prev_key)
+        {
+            prev_item.next = next;
+        }
+        if let Some(next_key) = next
+            && let Some(next_item) = self.map.get_mut(next_key)
+        {
+            next_item.prev = prev;
+        }
+    }
+
+    /// Neighbour half of [`link_tail`], for callers that have already written
+    /// the item's own links. `old_tail` must be the destination list's tail as
+    /// read *before* the item was rewritten.
+    fn attach_tail<const HOT: QueueMarker>(&mut self, key: TaskId, old_tail: Option<TaskId>) {
+        if let Some(tail_key) = old_tail
+            && let Some(tail_item) = self.map.get_mut(tail_key)
+        {
+            tail_item.next = Some(key);
+        }
+        let list = if HOT { &mut self.hot } else { &mut self.cold };
+        list.tail = Some(key);
+        if list.head.is_none() {
+            list.head = Some(key);
+        }
+    }
+
     fn unlink<const HOT: QueueMarker>(&mut self, key: TaskId) {
         let list = if HOT { &mut self.hot } else { &mut self.cold };
 
@@ -314,26 +360,36 @@ impl Inner {
     }
 
     fn make_hot(&mut self, key: TaskId) {
-        let Some(item) = self.map.get_mut(key) else {
-            return;
+        let new_tail = self.hot.tail;
+
+        // One lookup of `key`: classify it, and if it really has to move, read
+        // its old links and install the new ones in the same borrow.
+        let (prev, next) = {
+            let Some(item) = self.map.get_mut(key) else {
+                return;
+            };
+            match item.place {
+                // Already queued for a poll.
+                Place::Hot => return,
+                // Being polled right now: it is in neither list, so there is
+                // nothing to move. Recording that it was woken is enough, and
+                // `finish_run` then links it into the hot list instead of the
+                // cold one.
+                Place::Running { .. } => {
+                    item.place = Place::Running { woken: true };
+                    return;
+                }
+                Place::Cold => {}
+            }
+            let old = (item.prev, item.next);
+            item.prev = new_tail;
+            item.next = None;
+            item.place = Place::Hot;
+            old
         };
 
-        match item.place {
-            // Already queued for a poll.
-            Place::Hot => return,
-            // Being polled right now: it is in neither list, so there is
-            // nothing to move. Recording that it was woken is enough, and
-            // `finish_run` then links it into the hot list instead of the cold
-            // one.
-            Place::Running { .. } => {
-                item.place = Place::Running { woken: true };
-                return;
-            }
-            Place::Cold => {}
-        }
-
-        self.unlink::<COLD>(key);
-        self.link_tail::<HOT>(key);
+        self.detach::<COLD>(key, prev, next);
+        self.attach_tail::<HOT>(key, new_tail);
     }
 }
 
