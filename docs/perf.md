@@ -137,19 +137,66 @@ an intrusive linked list that loom is used to verify, and 0.76% does not buy tha
 maintenance risk. Recorded here so the number does not have to be re-derived if
 someone disagrees.
 
+### Rejected: fusing `remove()`
+
+`remove()` had the same three-lookup shape the wake path did — `get(key)` for
+`is_hot`, `unlink`'s own `get(key)`, then `map.remove(key)`. Since
+`SlotMap::remove` hands the whole item back, links included, fusing looks
+obvious.
+
+It is a **regression**:
+
+| benchmark | before | after | delta |
+| --------- | -----: | ----: | ----: |
+| `spawn_ready` n1000 | 524,182 | 535,183 | **+2.1%** |
+| `local_wake` n1000 | 287,063 | 288,075 | +0.35% |
+
+Isolating the two halves explains why. The refactor that extracted a shared
+`detach` helper measured *exactly* neutral — `No change` on both benchmarks — so
+the whole regression came from the fusing itself. The lookups were never the
+cost here: `SlotMap::remove` moves the entire `Item` (including the `Task`) out
+by value, and doing that before the neighbour fix-ups is worse than reading a
+single `bool` and letting `unlink` work in place.
+
+Worth stating plainly, because it is the same reasoning that produced a −13.6%
+win on the wake path. "Fewer lookups" is not a law; it happened to be the
+binding constraint in one place and not the other. Measure each one.
+
+## Where the remaining time actually goes
+
+From `callgrind_annotate` over the iai profiles, rather than from reading code.
+
+### `spawn_ready`: about a third is the allocator
+
+| function | instructions | share |
+| -------- | -----------: | ----: |
+| `_int_malloc` | 137,573 | 26.3% |
+| `Executor::tick` (queue.rs) | 63,084 | 12.0% |
+| `malloc` | 45,000 | 8.6% |
+| `__memcpy_avx_unaligned_erms` | 32,032 | 6.1% |
+| `Task::drop` | 28,000 | 5.3% |
+
+**~35% of spawning is malloc.** That is `TaskAlloc<F>` — one heap allocation per
+spawn — not queue bookkeeping. Further micro-optimisation of the list code will
+not move this number; pooling or arena-allocating task storage would, and that is
+a real design change rather than a tweak.
+
+### `local_wake`: no allocation at all
+
+The wake path shows no `malloc` in its profile. The cost is spread across
+`Executor::tick`, `TaskQueue`, and `Task::schedule`, with no single site above
+18%. The −13.6% above took the concentrated win; what is left is diffuse, and
+the next percent there will cost far more effort than the last thirteen did.
+
 ## Open opportunities
 
 Not yet measured — listed with the mechanism so the next person can start from a
 hypothesis rather than a hunch.
 
-- **`remove()` has the same three-lookup shape** as `make_hot` did: `get(key)`
-  for `is_hot`, `unlink`'s `get(key)`, then `map.remove(key)`. The same fusing
-  should apply. Lower value than the wake path because removal happens once per
-  task rather than once per wake.
-- **`spawn_ready` is still ~520 instructions per task.** The relink work is now
-  small, so the remainder is task allocation (`TaskAlloc<F>`, one box per spawn)
-  and `SlotMap` insertion. Worth a callgrind annotation pass to see the split
-  before attempting anything.
+- **Task allocation is the biggest single lever** (see above). One `Box` per
+  spawn, 35% of spawn cost. A free-list of `TaskAlloc` blocks sized by layout, or
+  an arena tied to executor lifetime, are the obvious shapes. Both interact with
+  the intrusive refcount, so neither is small.
 - **Driver submission batching** (`compio-driver`, io_uring SQ/CQ) is untouched
   by this work and has no instruction-count benchmark. It is also the layer where
   syscall count, not instruction count, dominates — so it needs a different
