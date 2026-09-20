@@ -89,7 +89,18 @@ impl<T: IoBuf> Slice<T> {
     /// Panics if `begin` is greater than the length of the underlying buffer.
     pub fn set_begin(&mut self, begin: usize) {
         assert!(begin <= self.buffer.buf_len());
-        // Safety: we just checked the invariant
+        // SAFETY:
+        // Operation: `Slice::set_begin_unchecked(begin)`.
+        // Contract: `begin` must be at most the length of the underlying
+        // buffer.
+        // Evidence:
+        // - LOCAL FACT: the `assert!` on the line above panics otherwise, and
+        //   nothing between it and this call mutates `self` or `begin`.
+        // - DEPENDENCY LEMMA: `IoBuf::buf_len` is defined as `as_init().len()`,
+        //   a safe method; see `docs/soundness.md` for what that dependency
+        //   does and does not buy. `Slice` stores the offset without forming a
+        //   pointer from it, so an over-large `begin` gives a wrong view here
+        //   rather than undefined behaviour.
         unsafe { self.set_begin_unchecked(begin) }
     }
 }
@@ -107,7 +118,17 @@ impl<T: IoBuf> Slice<Slice<T>> {
             (None, large_end) => large_end,
         };
 
-        // Safety: inner.begin + outer.begin <= buf_len
+        // SAFETY:
+        // Operation: `Slice::new(buffer, new_begin, new_end)`.
+        // Contract: `new_begin` must be at most the length of `buffer`.
+        // Evidence:
+        // - INVARIANT: every `Slice<U>` is built with `begin <= U::buf_len()`.
+        //   Applied to the outer slice, `self.begin <= self.buffer.buf_len()`,
+        //   where `self.buffer` is the inner `Slice<T>`.
+        // - LOCAL FACT: `Slice<T>`'s `buf_len` is `end_or_len() - begin`, and
+        //   `end_or_len()` is capped at `T::buf_len()`. So `self.begin <=
+        //   T::buf_len() - large_begin`, i.e. `large_begin + self.begin <=
+        //   T::buf_len()`, which is exactly `new_begin`.
         unsafe { Slice::new(self.buffer.buffer, new_begin, new_end) }
     }
 }
@@ -210,9 +231,23 @@ impl<T: IoBufMut> IoBufMut for Slice<T> {
 
 impl<T: SetLen> SetLen for Slice<T> {
     unsafe fn set_len(&mut self, len: usize) {
-        // SAFETY: `begin` is the slice's offset into the buffer, so `begin +
-        // len` names the same byte in the buffer that `len` names in
-        // the slice.
+        // SAFETY:
+        // Operation: `SetLen::set_len(self.begin + len)` on the underlying
+        // buffer.
+        // Contract: `self.begin + len <= buffer.as_uninit().len()`, and the
+        // bytes in `[buffer.buf_len(), self.begin + len)` are initialized.
+        // Evidence:
+        // - INVARIANT: `self.begin` is this slice's offset into the buffer, so
+        //   byte `len` of the slice is byte `self.begin + len` of the buffer;
+        //   the two obligations name the same bytes under that shift.
+        // - PRECONDITION: `SetLen::set_len` on this slice requires `len <=
+        //   self.as_uninit().len()` and `[self.buf_len(), len)` initialized.
+        //   `Slice`'s `as_uninit` is the buffer's `as_uninit` from `begin` to
+        //   `end_or_cap()`, so translating both by `begin` gives the callee's
+        //   obligations.
+        // - LOCAL FACT: no overflow check is made here; `begin` and `len` are
+        //   both bounded by the buffer's capacity, so their sum is bounded by
+        //   twice an allocation size and cannot wrap `usize`.
         unsafe { self.buffer.set_len(self.begin + len) }
     }
 }
@@ -302,8 +337,20 @@ impl<T: IoVectoredBuf> IoVectoredBuf for VectoredSlice<T> {
 
 impl<T: SetLen> SetLen for VectoredSlice<T> {
     unsafe fn set_len(&mut self, len: usize) {
-        // SAFETY: `begin` is this slice's offset, so `begin + len` names the
-        // same position in the underlying vectored buffer.
+        // SAFETY:
+        // Operation: `SetLen::set_len(self.begin + len)` on the underlying
+        // vectored buffer.
+        // Contract: `self.begin + len` is within that buffer's total capacity,
+        // and the bytes it adds are initialized.
+        // Evidence:
+        // - INVARIANT: `self.begin` is the number of bytes of the underlying
+        //   vectored buffer that this slice skips, so position `len` in the
+        //   slice is position `self.begin + len` in the buffer.
+        // - PRECONDITION: `SetLen::set_len` on this slice carries exactly those
+        //   facts for `len` in the slice's own coordinates; the shift by
+        //   `begin` restates them in the buffer's.
+        // - LOCAL FACT: both operands are bounded by the buffer's capacity, so
+        //   the sum cannot wrap `usize`.
         unsafe { self.buf.set_len(self.begin + len) }
     }
 }

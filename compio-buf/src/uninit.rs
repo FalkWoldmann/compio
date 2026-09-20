@@ -59,8 +59,21 @@ impl<T: IoBufMut> IoBufMut for Uninit<T> {
 
 impl<T: SetLen + IoBuf> SetLen for Uninit<T> {
     unsafe fn set_len(&mut self, len: usize) {
-        // SAFETY: `Uninit` only narrows the view; the length it is given refers
-        // to the same buffer the inner `SetLen` resizes.
+        // SAFETY:
+        // Operation: `SetLen::set_len(len)` on the inner buffer.
+        // Contract: `len <= self.0.as_uninit().len()`, and the bytes in
+        // `[self.0.buf_len(), len)` are initialized.
+        // Evidence:
+        // - PRECONDITION: `SetLen::set_len` on the `Uninit` wrapper carries the
+        //   same two facts.
+        // - INVARIANT: `Uninit` wraps the buffer without reallocating or
+        //   copying it, so `len` names the same byte position in the inner
+        //   buffer as it does in the wrapper, and the caller's promise carries
+        //   over unchanged.
+        // - LOCAL FACT: `Uninit`'s own `as_uninit` returns the tail from
+        //   `buf_len()` onward, so it is shorter than the inner buffer's. That
+        //   makes the first obligation strictly easier for the callee than for
+        //   the caller, never harder.
         unsafe {
             self.0.set_len(len);
         }

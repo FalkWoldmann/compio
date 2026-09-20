@@ -258,17 +258,51 @@ impl<T: IoBufMut, Rest: IoVectoredBufMut> SetLen for (T, Rest) {
         let head_len = std::cmp::min(len, self.0.buf_capacity());
         let rest_len = len - head_len;
 
-        // SAFETY: head_len <= self.0.buf_capacity()
+        // SAFETY:
+        // Operation: `SetLen::set_len(head_len)` on the head buffer.
+        // Contract: `head_len <= self.0.as_uninit().len()`, and the bytes in
+        // `[self.0.buf_len(), head_len)` are initialized.
+        // Evidence:
+        // - LOCAL FACT: `head_len` is `min(len, self.0.buf_capacity())`, so it
+        //   is at most `self.0.buf_capacity()`.
+        // - DEPENDENCY LEMMA: `IoBufMut::buf_capacity` is defined as
+        //   `as_uninit().len()`, which turns the line above into the first
+        //   obligation. It is read here and again inside `set_len`, so this
+        //   step trusts a safe implementation to answer both calls
+        //   consistently; see `docs/soundness.md`.
+        // - PRECONDITION: the caller promised the first `len` bytes of the
+        //   tuple, taken in order, are initialized; the head holds the first
+        //   `head_len` of them.
         unsafe { self.0.set_len(head_len) };
-        // SAFETY: propagate
+        // SAFETY:
+        // Operation: `SetLen::set_len(rest_len)` on the tail.
+        // Contract: `rest_len` is within the tail's total capacity, and the
+        // bytes it names are initialized.
+        // Evidence:
+        // - LOCAL FACT: `rest_len` is `len - head_len`, which is non-zero only
+        //   when `head_len` saturated at `self.0.buf_capacity()`; in that case
+        //   `rest_len = len - self.0.buf_capacity()`. The subtraction cannot
+        //   underflow because `head_len <= len` by construction.
+        // - PRECONDITION: the caller promised `len` is at most the sum of the
+        //   tuple's capacities, so subtracting the head's leaves at most the
+        //   tail's sum, and the bytes named are the remainder of the
+        //   initialized prefix.
         unsafe { self.1.set_len(rest_len) };
     }
 }
 
 impl<T: IoBufMut> SetLen for (T,) {
     unsafe fn set_len(&mut self, len: usize) {
-        // SAFETY: a one-tuple is just its element, so the caller's obligation
-        // applies to it unchanged.
+        // SAFETY:
+        // Operation: `SetLen::set_len(len)` on the single element.
+        // Contract: `len <= self.0.as_uninit().len()`, and the bytes in
+        // `[self.0.buf_len(), len)` are initialized.
+        // Evidence:
+        // - PRECONDITION: `SetLen::set_len` on the one-tuple carries those
+        //   facts for the tuple.
+        // - LOCAL FACT: a one-tuple's capacity sum and initialized prefix are
+        //   its element's, so there is nothing to redistribute and the
+        //   obligations transfer verbatim.
         unsafe { self.0.set_len(len) };
     }
 }
@@ -347,9 +381,21 @@ impl<T: IoVectoredBuf + SetLen> SetLen for VectoredBufIter<T> {
     unsafe fn set_len(&mut self, len: usize) {
         self.filled = len;
 
-        // SAFETY: `total_filled` counts the buffers already consumed, so
-        // `total_filled + filled` is the same position in the underlying buffer
-        // that `len` names in this iterator's view.
+        // SAFETY:
+        // Operation: `SetLen::set_len(self.total_filled + self.filled)` on the
+        // underlying vectored buffer.
+        // Contract: that sum is within the buffer's total capacity, and the
+        // bytes it adds are initialized.
+        // Evidence:
+        // - INVARIANT: `total_filled` is the number of bytes in the buffers
+        //   this iterator has already walked past, so position `len` in the
+        //   current view is position `total_filled + len` in the buffer.
+        // - PRECONDITION: `SetLen::set_len` on the iterator carries those facts
+        //   for `len` in the view's coordinates; `self.filled` was just
+        //   assigned `len` on the line above, and the shift by `total_filled`
+        //   restates them in the buffer's coordinates.
+        // - LOCAL FACT: both operands are bounded by the buffer's capacity, so
+        //   the sum cannot wrap `usize`.
         unsafe { self.buf.set_len(self.total_filled + self.filled) };
     }
 }
