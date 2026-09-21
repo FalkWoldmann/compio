@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(buf)* `IoBufMut::as_mut_slice` built its slice from `buf_len()` and
+  `as_uninit()`'s pointer. Those come from two different safe trait methods,
+  which need not agree, so an implementation reporting a longer initialized
+  prefix than it exposes produced a `&mut [u8]` past the end of the
+  allocation. The length is now clamped to what `as_uninit` returns, with a
+  `debug_assert!` so an inconsistent implementation is loud rather than
+  silently truncated.
+- *(buf)* `IoBufMut::reserve`'s default implementation computed
+  `buf_capacity() - init`, which wrapped when the two disagreed and reported
+  capacity that does not exist. `extend_from_slice` trusted that and wrote
+  past the allocation. `reserve` now saturates, and `extend_from_slice` bounds
+  its write against the buffer's real uninit slice rather than trusting
+  `reserve`.
+
+
 ## 0.8.3 - 2026-06-14
 
 ### Added

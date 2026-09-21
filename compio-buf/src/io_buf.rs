@@ -394,7 +394,11 @@ pub trait IoBufMut: IoBuf + SetLen {
     /// [`Err(ReserveError::NotSupported)`]: ReserveError::NotSupported
     fn reserve(&mut self, len: usize) -> Result<(), ReserveError> {
         let init = (*self).buf_len();
-        if len <= self.buf_capacity() - init {
+        // `buf_capacity()` and `buf_len()` are safe methods on a trait anyone
+        // may implement, so they need not agree. A plain subtraction wraps
+        // when they disagree and reports capacity that does not exist --
+        // `8usize - 1000` becomes ~1.8e19, and `reserve` says yes.
+        if len <= self.buf_capacity().saturating_sub(init) {
             return Ok(());
         }
         Err(ReserveError::NotSupported)
@@ -447,12 +451,26 @@ pub trait IoBufMutExt: IoBufMut {
     /// [`IoBuf::as_init`], but mutable.
     fn as_mut_slice(&mut self) -> &mut [u8] {
         let len = (*self).buf_len();
-        let ptr = (*self).buf_mut_ptr();
+        let uninit = self.as_uninit();
+        // `IoBuf` and `IoBufMut` are safe traits, so `buf_len()` (which comes
+        // from `as_init`) can exceed what `as_uninit` actually exposes.
+        // Building the slice from `buf_len()` and `as_uninit()`'s pointer then
+        // puts the result past the end of the allocation. Clamping keeps an
+        // inconsistent implementation merely wrong instead of unsound; the
+        // assertion makes it loud in debug builds rather than silently handing
+        // back a shorter slice than the caller asked for.
+        debug_assert!(
+            len <= uninit.len(),
+            "IoBuf::as_init reports {len} initialized bytes but IoBufMut::as_uninit exposes only \
+             {}; the two must describe the same buffer",
+            uninit.len(),
+        );
+        let n = len.min(uninit.len());
         // SAFETY:
-        // - lifetime of the returned slice is bounded by &mut self
-        // - bytes within `len` are guaranteed to be initialized
-        // - the pointer is derived from
-        unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, len) }
+        // - the lifetime of the returned slice is bounded by `&mut self`
+        // - `[0, n)` is within `as_uninit()`, and those bytes are the buffer's
+        //   initialized prefix
+        unsafe { uninit[..n].assume_init_mut() }
     }
 
     /// Extend the buffer by copying bytes from `src`.
@@ -467,18 +485,28 @@ pub trait IoBufMutExt: IoBufMut {
         let len = src.len();
         let init = (*self).buf_len();
         self.reserve(len)?;
-        let ptr = self.buf_mut_ptr().wrapping_add(init);
+
+        // `reserve` returning `Ok` is not evidence of anything: it is a safe
+        // method, and its default implementation only compares two other safe
+        // methods. Take the destination from a single `as_uninit()` call and
+        // bound the write against that slice's real length, so a buffer whose
+        // `buf_len()` and `buf_capacity()` disagree with it cannot make us
+        // write out of bounds.
+        let uninit = self.as_uninit();
+        let Some(dst) = uninit.get_mut(init..).and_then(|t| t.get_mut(..len)) else {
+            return Err(ReserveError::NotSupported);
+        };
 
         unsafe {
             // SAFETY:
-            // - we have reserved enough capacity so the ptr and len stays in
-            //   one allocation
-            // - src is valid for len bytes
-            // - ptr is valid for len bytes
-            // - &mut self guarantees that src cannot overlap with dst
-            std::ptr::copy_nonoverlapping(src.as_ptr() as _, ptr, len);
+            // - `dst` is a live slice of length exactly `len`, carved out of
+            //   the buffer's own uninit view, so it is valid for `len` writes
+            // - `src` is valid for `len` reads
+            // - `&mut self` guarantees `src` cannot overlap with `dst`
+            std::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr() as *mut u8, len);
 
-            // SAFETY: the bytes in range [init, init + len) are initialized now
+            // SAFETY: the copy initialized exactly `[init, init + len)`, and
+            // `dst` was carved at that range, so `init + len <= uninit.len()`
             self.advance_to(init + len);
         }
 
@@ -1054,5 +1082,88 @@ mod test {
         let mut buf = [];
         let res = IoBufMutExt::extend_from_slice(&mut buf, b" ");
         assert!(res.is_err_and(|x| x.is_not_supported()));
+    }
+}
+
+#[cfg(test)]
+mod soundness_tests {
+    use std::mem::MaybeUninit;
+
+    use crate::*;
+
+    /// `IoBuf`/`IoBufMut` are safe traits, so an implementation can report a
+    /// longer initialized prefix than it actually exposes. Both halves here
+    /// are real, valid allocations -- they simply disagree, which safe code
+    /// is free to do.
+    struct Inconsistent {
+        init: Vec<u8>,
+        uninit: [u8; 8],
+    }
+
+    impl Inconsistent {
+        fn new() -> Self {
+            Self {
+                init: vec![0; 1000],
+                uninit: [0; 8],
+            }
+        }
+    }
+
+    impl IoBuf for Inconsistent {
+        fn as_init(&self) -> &[u8] {
+            &self.init
+        }
+    }
+
+    impl SetLen for Inconsistent {
+        unsafe fn set_len(&mut self, _len: usize) {}
+    }
+
+    impl IoBufMut for Inconsistent {
+        fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+            // SAFETY: `self.uninit` is a live `[u8; 8]` borrowed mutably for
+            // the returned lifetime, and every `u8` is a valid
+            // `MaybeUninit<u8>`.
+            unsafe {
+                std::slice::from_raw_parts_mut(self.uninit.as_mut_ptr() as *mut MaybeUninit<u8>, 8)
+            }
+        }
+    }
+
+    /// Debug builds should say so loudly rather than quietly hand back a
+    /// shorter slice than `buf_len()` advertised.
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "describe the same buffer")]
+    fn as_mut_slice_asserts_when_the_impls_disagree() {
+        let _ = Inconsistent::new().as_mut_slice();
+    }
+
+    /// The soundness property, which must hold with assertions compiled out:
+    /// the slice never runs past what `as_uninit` actually exposes. Before the
+    /// clamp this produced a 1000-byte slice over 8 bytes of storage, which
+    /// Miri reported as a dangling reference.
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn as_mut_slice_clamps_when_the_impls_disagree() {
+        assert_eq!(
+            Inconsistent::new().as_mut_slice().len(),
+            8,
+            "as_mut_slice must not exceed what as_uninit exposes"
+        );
+    }
+
+    /// `buf_len()` is 1000 and `buf_capacity()` is 8. The old
+    /// `buf_capacity() - init` wrapped to ~1.8e19, so `reserve` said Ok and
+    /// `extend_from_slice` wrote 992 bytes past an 8-byte allocation.
+    #[test]
+    fn extend_from_slice_refuses_when_the_impls_disagree() {
+        assert!(Inconsistent::new().extend_from_slice(b"abcd").is_err());
+    }
+
+    /// The same disagreement must not make `reserve` itself claim capacity.
+    #[test]
+    fn reserve_refuses_when_the_impls_disagree() {
+        assert!(Inconsistent::new().reserve(4).is_err());
     }
 }
