@@ -170,6 +170,40 @@ and `AncillaryBuilder::new` are public and safe, for any user `B: IoBufMut`.
 **Fixed** by capturing the base once in `new` and using that stored pointer in
 `push`, the same shape as the 2b fix.
 
+### 2e. `BytesMut::as_uninit` built a slice from a pointer that did not cover it
+
+Found by the contract test added with the `unsafe trait` change, which is the
+first thing in the tree to call `BytesMut::as_uninit` under Miri.
+
+```rust
+let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
+let cap = self.capacity();
+unsafe { std::slice::from_raw_parts_mut(ptr, cap) }
+```
+
+`BytesMut` has no inherent `as_mut_ptr`; the call resolves through `DerefMut`,
+which yields a `&mut [u8]` of length `len()`. The pointer therefore carries
+provenance for `len()` bytes while the slice claims `capacity()`. Miri rejects
+it whenever `cap > len` -- which, for a read buffer, is always:
+
+> trying to retag from `<150290>` for Unique permission at `alloc50707[0x0]`,
+> but that tag does not exist in the borrow stack for this location
+
+The existing SAFETY comment asserted *"DEPENDENCY LEMMA: `BytesMut::as_mut_ptr`
+is valid for `capacity()` bytes in one allocation"*. That lemma is false, and
+naming it is what made the comment look discharged. This is the third
+proof-shaped comment on this branch whose stated premise did not hold.
+
+**Fixed** by deriving the pointer from `spare_capacity_mut`, which `bytes`
+implements from its own owning pointer rather than through `Deref`. Shrinking
+the length to zero first makes the spare region cover the whole allocation; the
+original length is restored before returning.
+
+The other in-tree implementations were checked the same way and are fine:
+`Vec` and `ArrayVec` have inherent `as_mut_ptr`, and a non-spilled `SmallVec`
+keeps its storage inside the struct, so `&mut self` already covers it. A
+spilled `SmallVec` is heap-backed and is now covered by the test too.
+
 ## Severity
 
 Neither is remotely triggerable; both require the local program to call the API.
@@ -179,7 +213,8 @@ but an ordinary mistake: a cached length that drifts, an `as_uninit` that
 reallocates.
 
 The rule being broken in both cases is that safe code must not be able to cause
-undefined behaviour.
+undefined behaviour. Both are now fixed: bug 1 by the `unsafe fn` signatures,
+bug 2 by the trait obligations below.
 
 ## Prior art: this was fixed once and regressed
 
@@ -245,28 +280,59 @@ never executes them. It is also a separate workflow rather than a step in
 `TestExecutor`, whose `paths:` filter matches only `compio-executor` — a step
 added there would not have run on a `compio-buf` change at all.
 
-## Recommended fix
+## The fix
 
-Make `IoBuf` and `IoBufMut` `unsafe trait`s stating the implementor's
-obligations, and resolve bug 1 by option 1 or 2 above:
+`IoBuf`, `IoBufMut`, `IoVectoredBuf`, `IoVectoredBufMut` and `SetLen` are now
+`unsafe trait`s carrying the implementor obligations unsafe code already
+depended on:
 
-```rust
-/// # Safety
-///
-/// Implementors must ensure that:
-/// 1. `as_uninit` returns the same pointer and length on every call, until the
-///    buffer is mutated through `&mut self`.
-/// 2. `as_init().len() <= as_uninit().len()`.
-/// 3. `as_init()` and `as_uninit()` address the same allocation, with
-///    `as_init()` a prefix of it.
-```
+| Trait | Obligations |
+| --- | --- |
+| `IoBuf` | `as_init` is stable across calls until `&mut self`; the slice is one live, fully initialized allocation |
+| `IoBufMut` | `as_uninit` is stable; `as_init` is a prefix of it in the same allocation; every byte below `as_init().len()` is initialized |
+| `IoVectoredBuf` | `iter_slice` is idempotent in slices *and order*; each slice meets `IoBuf`'s obligations |
+| `IoVectoredBufMut` | same for `iter_uninit_slice`, against the matching `iter_slice` slice |
+| `SetLen` | after `set_len(n)`, `as_init().len() == n`, and `IoBufMut`'s obligations still hold |
 
-This is a breaking change for downstream implementors, which is the honest cost
-of the guarantee. The fixes already applied remove the reachable consequences of
-bug 2 without changing any public signature. Bug 1 had no such mitigation and is
-fixed by the signature change described above; what remains here is bug 2's root
-cause, which needs the implementor obligations to become a trait-level
-guarantee.
+This closes bug 2 at the root rather than at each call site. `IoVectoredBuf`'s
+idempotency was already written down, as a "Note for implementors" — unsafe
+code built an `iovec` array from one traversal and resolved completions against
+another, so it was always a safety obligation wearing a convention's clothes.
+
+Bug 1 is closed separately, by `as_uninit` and its siblings becoming
+`unsafe fn`: that hazard is the *caller* de-initializing bytes the buffer
+promised were initialized, which no implementor obligation can prevent.
+
+### What this does not change
+
+The defensive measures added before this — the `as_mut_slice` clamp, the
+saturating `reserve`, `extend_from_slice` bounding against the real slice,
+capturing base pointers once in `RecvMsg`/`SendMsg` and `AncillaryBuilder` —
+all stay. They are no longer load-bearing: a correct implementation cannot
+reach them. They remain as belt-and-braces, so an implementation that breaks
+its contract is merely wrong rather than memory-unsafe, and the
+`debug_assert!` says so out loud. The adversarial test types that drive them
+are now marked as deliberately contract-violating.
+
+### Cost
+
+This is a breaking change for downstream implementors: every
+`impl IoBuf for MyBuf` becomes `unsafe impl IoBuf for MyBuf`, and the
+implementor takes on the obligations above. That is the honest price of the
+guarantee, and it is the state the crate was in from #220 until #555 removed
+the marker by accident.
+
+Nothing else in the public API changes. Callers who only *use* buffers are
+unaffected.
+
+### Guarding the regression
+
+#555 dropped the `unsafe` marker and shipped, and the loss went unnoticed
+because nothing failed. `io_buf.rs` and `io_vec_buf.rs` now carry static
+assertions — an `unsafe impl` of each trait for a private empty type — that
+fail to compile with `error[E0199]: implementing the trait is not unsafe` if
+any marker is removed again. A plain `cargo check` catches it; no test run is
+needed.
 
 ## Reproducers
 

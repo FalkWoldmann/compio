@@ -9,13 +9,67 @@ use crate::*;
 /// The `IoBuf` trait is implemented by buffer types that can be passed to
 /// immutable completion-based IO operations, like writing its content to a
 /// file. This trait will only take initialized bytes of a buffer into account.
-pub trait IoBuf: 'static {
+///
+/// # Safety
+///
+/// Unsafe code hands the pointer and length behind `as_init` to the kernel and
+/// to `copy_nonoverlapping`, so an implementation that misreports either is a
+/// memory-safety bug, not merely a wrong answer. Implementors must ensure:
+///
+/// 1. **Stability.** `as_init` returns the same pointer and length on every
+///    call, until the buffer is mutated through `&mut self`. An IO operation
+///    may read the two in separate calls and combine them.
+/// 2. **Validity.** The returned slice is a live, fully initialized region of
+///    one allocation that stays valid for as long as the borrow.
+///
+/// This trait was `unsafe` when introduced in #220, and
+/// [#555](https://github.com/compio-rs/compio/pull/555) removed the marker
+/// while its intended replacement -- a single `unsafe fn buffer` -- never
+/// landed. See `docs/soundness.md`.
+pub unsafe trait IoBuf: 'static {
     /// Get the slice of initialized bytes.
     fn as_init(&self) -> &[u8];
 }
 
 /// A static assertion that [`IoBuf`] is dyn-compatible (object-safe).
 const _: [&dyn IoBuf; 0] = [];
+
+/// A static assertion that [`IoBuf`], [`IoBufMut`] and [`SetLen`] are still
+/// `unsafe trait`s.
+///
+/// `IoBuf` was made `unsafe` in response to
+/// [#220](https://github.com/compio-rs/compio/issues/220), and
+/// [#555](https://github.com/compio-rs/compio/pull/555) then removed the marker
+/// while the `unsafe fn buffer` that was to replace it never landed -- a
+/// silent regression that stood until it was rediscovered. If a future refactor
+/// drops `unsafe` from any of these traits again, these impls stop compiling
+/// with `error[E0199]: implementing the trait is not unsafe` rather than
+/// quietly handing every downstream implementor the ability to cause UB from
+/// safe code.
+const _: () = {
+    struct Empty;
+
+    // SAFETY: an empty slice with a stable address and no bytes, so every
+    // obligation holds vacuously.
+    unsafe impl IoBuf for Empty {
+        fn as_init(&self) -> &[u8] {
+            &[]
+        }
+    }
+
+    // SAFETY: as above -- there is no length to move.
+    unsafe impl SetLen for Empty {
+        unsafe fn set_len(&mut self, _len: usize) {}
+    }
+
+    // SAFETY: as above -- `as_uninit` is empty, so it agrees with `as_init`
+    // on every call and containment holds vacuously.
+    unsafe impl IoBufMut for Empty {
+        unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+            &mut []
+        }
+    }
+};
 
 /// Extension trait for immutable buffers.
 pub trait IoBufExt: IoBuf {
@@ -110,19 +164,28 @@ pub trait IoBufExt: IoBuf {
 
 impl<B: IoBuf + ?Sized> IoBufExt for B {}
 
-impl<B: IoBuf + ?Sized> IoBuf for &'static B {
+// SAFETY: forwards to the wrapped buffer's implementation, which carries
+// the same obligations. This wrapper stores no pointer or length of its
+// own, so it cannot make successive calls disagree.
+unsafe impl<B: IoBuf + ?Sized> IoBuf for &'static B {
     fn as_init(&self) -> &[u8] {
         (**self).as_init()
     }
 }
 
-impl<B: IoBuf + ?Sized> IoBuf for &'static mut B {
+// SAFETY: forwards to the wrapped buffer's implementation, which carries
+// the same obligations. This wrapper stores no pointer or length of its
+// own, so it cannot make successive calls disagree.
+unsafe impl<B: IoBuf + ?Sized> IoBuf for &'static mut B {
     fn as_init(&self) -> &[u8] {
         (**self).as_init()
     }
 }
 
-impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBuf
+// SAFETY: forwards to the wrapped buffer's implementation, which carries
+// the same obligations. This wrapper stores no pointer or length of its
+// own, so it cannot make successive calls disagree.
+unsafe impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBuf
     for t_alloc!(Box, B, A)
 {
     fn as_init(&self) -> &[u8] {
@@ -130,7 +193,10 @@ impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static
     }
 }
 
-impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBuf
+// SAFETY: forwards to the wrapped buffer's implementation, which carries
+// the same obligations. This wrapper stores no pointer or length of its
+// own, so it cannot make successive calls disagree.
+unsafe impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBuf
     for t_alloc!(Rc, B, A)
 {
     fn as_init(&self) -> &[u8] {
@@ -138,37 +204,58 @@ impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static
     }
 }
 
-impl IoBuf for [u8] {
+// SAFETY: the pointer and length both come from one allocation this value
+// owns, so successive calls agree and `as_init` is a prefix of
+// `as_uninit` whose bytes are initialized by construction. Neither can
+// change without `&mut self`.
+unsafe impl IoBuf for [u8] {
     fn as_init(&self) -> &[u8] {
         self
     }
 }
 
-impl<const N: usize> IoBuf for [u8; N] {
+// SAFETY: the pointer and length both come from one allocation this value
+// owns, so successive calls agree and `as_init` is a prefix of
+// `as_uninit` whose bytes are initialized by construction. Neither can
+// change without `&mut self`.
+unsafe impl<const N: usize> IoBuf for [u8; N] {
     fn as_init(&self) -> &[u8] {
         self
     }
 }
 
-impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBuf for t_alloc!(Vec, u8, A) {
+// SAFETY: the pointer and length both come from one allocation this value
+// owns, so successive calls agree and `as_init` is a prefix of
+// `as_uninit` whose bytes are initialized by construction. Neither can
+// change without `&mut self`.
+unsafe impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBuf
+    for t_alloc!(Vec, u8, A)
+{
     fn as_init(&self) -> &[u8] {
         self
     }
 }
 
-impl IoBuf for str {
+// SAFETY: the slice is one live, fully initialized allocation this value
+// owns; its pointer and length cannot change without `&mut self`.
+unsafe impl IoBuf for str {
     fn as_init(&self) -> &[u8] {
         self.as_bytes()
     }
 }
 
-impl IoBuf for String {
+// SAFETY: the slice is one live, fully initialized allocation this value
+// owns; its pointer and length cannot change without `&mut self`.
+unsafe impl IoBuf for String {
     fn as_init(&self) -> &[u8] {
         self.as_bytes()
     }
 }
 
-impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBuf
+// SAFETY: forwards to the wrapped buffer's implementation, which carries
+// the same obligations. This wrapper stores no pointer or length of its
+// own, so it cannot make successive calls disagree.
+unsafe impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBuf
     for t_alloc!(Arc, B, A)
 {
     fn as_init(&self) -> &[u8] {
@@ -177,35 +264,53 @@ impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static
 }
 
 #[cfg(feature = "bytes")]
-impl IoBuf for bytes::Bytes {
+// SAFETY: the slice is one live, fully initialized allocation this value
+// owns; its pointer and length cannot change without `&mut self`.
+unsafe impl IoBuf for bytes::Bytes {
     fn as_init(&self) -> &[u8] {
         self
     }
 }
 
 #[cfg(feature = "bytes")]
-impl IoBuf for bytes::BytesMut {
+// SAFETY: the pointer and length both come from one allocation this value
+// owns, so successive calls agree and `as_init` is a prefix of
+// `as_uninit` whose bytes are initialized by construction. Neither can
+// change without `&mut self`.
+unsafe impl IoBuf for bytes::BytesMut {
     fn as_init(&self) -> &[u8] {
         self
     }
 }
 
 #[cfg(feature = "read_buf")]
-impl IoBuf for std::io::BorrowedBuf<'static, u8> {
+// SAFETY: the pointer and length both come from one allocation this value
+// owns, so successive calls agree and `as_init` is a prefix of
+// `as_uninit` whose bytes are initialized by construction. Neither can
+// change without `&mut self`.
+unsafe impl IoBuf for std::io::BorrowedBuf<'static, u8> {
     fn as_init(&self) -> &[u8] {
         self.filled()
     }
 }
 
 #[cfg(feature = "arrayvec")]
-impl<const N: usize> IoBuf for arrayvec::ArrayVec<u8, N> {
+// SAFETY: the pointer and length both come from one allocation this value
+// owns, so successive calls agree and `as_init` is a prefix of
+// `as_uninit` whose bytes are initialized by construction. Neither can
+// change without `&mut self`.
+unsafe impl<const N: usize> IoBuf for arrayvec::ArrayVec<u8, N> {
     fn as_init(&self) -> &[u8] {
         self
     }
 }
 
 #[cfg(feature = "smallvec")]
-impl<const N: usize> IoBuf for smallvec::SmallVec<[u8; N]>
+// SAFETY: the pointer and length both come from one allocation this value
+// owns, so successive calls agree and `as_init` is a prefix of
+// `as_uninit` whose bytes are initialized by construction. Neither can
+// change without `&mut self`.
+unsafe impl<const N: usize> IoBuf for smallvec::SmallVec<[u8; N]>
 where
     [u8; N]: smallvec::Array<Item = u8>,
 {
@@ -215,14 +320,18 @@ where
 }
 
 #[cfg(feature = "memmap2")]
-impl IoBuf for memmap2::Mmap {
+// SAFETY: the slice is one live, fully initialized allocation this value
+// owns; its pointer and length cannot change without `&mut self`.
+unsafe impl IoBuf for memmap2::Mmap {
     fn as_init(&self) -> &[u8] {
         self
     }
 }
 
 #[cfg(feature = "memmap2")]
-impl IoBuf for memmap2::MmapMut {
+// SAFETY: the slice is one live, fully initialized allocation this value
+// owns; its pointer and length cannot change without `&mut self`.
+unsafe impl IoBuf for memmap2::MmapMut {
     fn as_init(&self) -> &[u8] {
         self
     }
@@ -386,7 +495,29 @@ mod smallvec_err {
 /// mutable completion-based IO operations, like reading content from a file and
 /// write to the buffer. This trait will take all space of a buffer into
 /// account, including uninitialized bytes.
-pub trait IoBufMut: IoBuf + SetLen {
+/// # Safety
+///
+/// `as_uninit` is the buffer's whole extent, and unsafe code combines it with
+/// [`IoBuf::as_init`] -- taking a pointer from one call and a length from
+/// another, handing both to the kernel. Implementors must ensure, in addition
+/// to [`IoBuf`]'s obligations:
+///
+/// 1. **Stability.** `as_uninit` returns the same pointer and length on every
+///    call, until the buffer is mutated through `&mut self`. In particular it
+///    must not reallocate, and must not be implemented in terms of anything
+///    that might.
+/// 2. **Containment.** `as_uninit()[..as_init().len()]` is in bounds -- that
+///    is, `as_init().len() <= as_uninit().len()`.
+/// 3. **Initialized prefix.** Every byte of that sub-slice is initialized.
+///
+/// Obligations 2 and 3 are stated against `as_uninit`'s own indices rather
+/// than as "`as_init` is a prefix of `as_uninit`", because the two need not
+/// start at the same address: [`Uninit`] exposes only a buffer's spare
+/// capacity, reporting an empty `as_init`, which satisfies both vacuously.
+/// What unsafe code relies on is exactly the form above -- it is what lets
+/// [`IoBufMutExt::as_mut_slice`] hand back `as_uninit()[..buf_len()]` as an
+/// initialized `&mut [u8]`.
+pub unsafe trait IoBufMut: IoBuf + SetLen {
     /// Get the full mutable slice of the buffer, including both initialized
     /// and uninitialized bytes.
     ///
@@ -440,10 +571,11 @@ pub trait IoBufMut: IoBuf + SetLen {
     /// [`Err(ReserveError::NotSupported)`]: ReserveError::NotSupported
     fn reserve(&mut self, len: usize) -> Result<(), ReserveError> {
         let init = (*self).buf_len();
-        // `buf_capacity()` and `buf_len()` are safe methods on a trait anyone
-        // may implement, so they need not agree; a plain subtraction here
-        // wraps when they disagree and reports capacity that does not exist.
-        // Saturating makes a disagreement deny the reservation instead.
+        // `IoBufMut`'s containment obligation says these two agree, so this
+        // cannot underflow in a correct implementation. Saturating anyway
+        // keeps a buggy one from wrapping to ~1.8e19 and reporting capacity
+        // that does not exist -- a wrong answer instead of an out-of-bounds
+        // write.
         if len <= self.buf_capacity().saturating_sub(init) {
             return Ok(());
         }
@@ -550,11 +682,11 @@ pub trait IoBufMutExt: IoBufMut {
         //   an uninitialized byte, so no caller of this safe method can
         //   de-initialize through it either.
         let uninit = unsafe { self.as_uninit() };
-        // `IoBuf` and `IoBufMut` are safe traits, so `buf_len()` (which comes
-        // from `as_init`) can exceed what `as_uninit` actually exposes.
-        // Clamping keeps an inconsistent implementation merely wrong
-        // instead of unsound; the assertion makes it loud in debug
-        // builds rather than silently handing back a shorter slice than
+        // `IoBufMut`'s containment obligation says `buf_len()` (which comes
+        // from `as_init`) never exceeds what `as_uninit` exposes. The clamp is
+        // belt-and-braces: it keeps an implementation that breaks its contract
+        // merely wrong instead of unsound, and the assertion makes it loud in
+        // debug builds rather than silently handing back a shorter slice than
         // the caller asked for.
         debug_assert!(
             len <= uninit.len(),
@@ -725,7 +857,10 @@ pub trait IoBufMutExt: IoBufMut {
 
 impl<B: IoBufMut + ?Sized> IoBufMutExt for B {}
 
-impl<B: IoBufMut + ?Sized> IoBufMut for &'static mut B {
+// SAFETY: forwards to the wrapped buffer's implementation, which carries
+// the same obligations. This wrapper stores no pointer or length of its
+// own, so it cannot make successive calls disagree.
+unsafe impl<B: IoBufMut + ?Sized> IoBufMut for &'static mut B {
     unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         // SAFETY:
         // Operation: `IoBufMut::as_uninit` on the wrapped buffer.
@@ -748,7 +883,10 @@ impl<B: IoBufMut + ?Sized> IoBufMut for &'static mut B {
     }
 }
 
-impl<B: IoBufMut + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBufMut
+// SAFETY: forwards to the wrapped buffer's implementation, which carries
+// the same obligations. This wrapper stores no pointer or length of its
+// own, so it cannot make successive calls disagree.
+unsafe impl<B: IoBufMut + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBufMut
     for t_alloc!(Box, B, A)
 {
     unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
@@ -773,7 +911,13 @@ impl<B: IoBufMut + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'sta
     }
 }
 
-impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBufMut for t_alloc!(Vec, u8, A) {
+// SAFETY: the pointer and length both come from one allocation this value
+// owns, so successive calls agree and `as_init` is a prefix of
+// `as_uninit` whose bytes are initialized by construction. Neither can
+// change without `&mut self`.
+unsafe impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBufMut
+    for t_alloc!(Vec, u8, A)
+{
     unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         let cap = self.capacity();
@@ -828,7 +972,11 @@ impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBufMut for t_al
     }
 }
 
-impl IoBufMut for [u8] {
+// SAFETY: the pointer and length both come from one allocation this value
+// owns, so successive calls agree and `as_init` is a prefix of
+// `as_uninit` whose bytes are initialized by construction. Neither can
+// change without `&mut self`.
+unsafe impl IoBufMut for [u8] {
     unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         let len = self.len();
@@ -856,7 +1004,11 @@ impl IoBufMut for [u8] {
     }
 }
 
-impl<const N: usize> IoBufMut for [u8; N] {
+// SAFETY: the pointer and length both come from one allocation this value
+// owns, so successive calls agree and `as_init` is a prefix of
+// `as_uninit` whose bytes are initialized by construction. Neither can
+// change without `&mut self`.
+unsafe impl<const N: usize> IoBufMut for [u8; N] {
     unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         // SAFETY:
@@ -884,25 +1036,62 @@ impl<const N: usize> IoBufMut for [u8; N] {
 }
 
 #[cfg(feature = "bytes")]
-impl IoBufMut for bytes::BytesMut {
+// SAFETY: the pointer and length both come from one allocation this value
+// owns, so successive calls agree and `as_init` is a prefix of
+// `as_uninit` whose bytes are initialized by construction. Neither can
+// change without `&mut self`.
+unsafe impl IoBufMut for bytes::BytesMut {
     unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
-        let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
+        let len = self.len();
         let cap = self.capacity();
+
+        // `BytesMut::as_mut_ptr` goes through `DerefMut`, which produces a
+        // `&mut [u8]` of length `len()`. The pointer it yields therefore
+        // carries provenance for only `len()` bytes, not `capacity()`, and
+        // building a `capacity()`-long slice from it is undefined behaviour
+        // under Stacked Borrows -- Miri rejects it whenever `cap > len`, which
+        // for a read buffer is always.
+        //
+        // `spare_capacity_mut` instead derives from `BytesMut`'s own owning
+        // pointer, so at length zero it hands back the whole allocation with
+        // the provenance to match. Shrinking to zero first is what makes the
+        // spare region cover `[0, cap)`.
+        //
+        // SAFETY:
+        // Operation: `BytesMut::set_len(0)`.
+        // Contract: the new length must not exceed the capacity, and the bytes
+        // below it must be initialized.
+        // Evidence:
+        // - AXIOM: zero is at most any capacity, and there are no bytes below
+        //   it to initialize.
+        unsafe { self.set_len(0) };
+
+        let ptr = self.spare_capacity_mut().as_mut_ptr();
+
+        // SAFETY:
+        // Operation: `BytesMut::set_len(len)`.
+        // Contract: as above.
+        // Evidence:
+        // - LOCAL FACT: `len` is the length this buffer had on entry, so it is
+        //   within capacity and those bytes are still initialized -- nothing
+        //   between the two calls writes to the buffer.
+        unsafe { self.set_len(len) };
+
         // SAFETY:
         // Operation: `core::slice::from_raw_parts_mut::<MaybeUninit<u8>>(ptr,
-        // cap)`. Contract: `ptr` must be non-null, aligned, and valid
-        // for reads and writes of `cap` elements in one allocation; the
-        // referenced memory must not be accessed through any other
-        // pointer for the returned lifetime; and the size in bytes must
-        // not exceed `isize::MAX`. Evidence:
-        // - DEPENDENCY LEMMA: `BytesMut::as_mut_ptr` is valid for `capacity()`
-        //   bytes in one allocation.
-        // - AXIOM: `MaybeUninit<u8>` has the same size and alignment as `u8`
-        //   (std), so the cast preserves both, and `u8`'s alignment of 1 makes
-        //   any non-null address aligned.
-        // - AXIOM: every byte pattern is a valid `MaybeUninit<u8>`, so the
-        //   initialization obligation is discharged for any live bytes.
-        // - TYPE FACT: `ptr` is derived from `&mut self`, and the returned
+        // cap)`. Contract: `ptr` must be non-null, aligned, and valid for
+        // reads and writes of `cap` elements in one allocation; the referenced
+        // memory must not be accessed through any other pointer for the
+        // returned lifetime; and the size in bytes must not exceed
+        // `isize::MAX`.
+        // Evidence:
+        // - LOCAL FACT: `ptr` came from `spare_capacity_mut` while the length
+        //   was zero, so it is the start of the allocation and carries
+        //   provenance for all `cap` of its bytes.
+        // - AXIOM: `MaybeUninit<u8>` has the same size and alignment as `u8`,
+        //   and `u8`'s alignment of 1 makes any non-null address aligned.
+        // - AXIOM: every byte pattern is a valid `MaybeUninit<u8>`.
+        // - TYPE FACT: `ptr` is derived from `&mut self` and the returned
         //   lifetime is tied to that borrow, so no other pointer may access the
         //   region while it lives.
         // - CALLER CONTRACT: `as_uninit` is an `unsafe fn` whose `# Safety`
@@ -935,7 +1124,11 @@ impl IoBufMut for bytes::BytesMut {
 }
 
 #[cfg(feature = "read_buf")]
-impl IoBufMut for std::io::BorrowedBuf<'static, u8> {
+// SAFETY: the pointer and length both come from one allocation this value
+// owns, so successive calls agree and `as_init` is a prefix of
+// `as_uninit` whose bytes are initialized by construction. Neither can
+// change without `&mut self`.
+unsafe impl IoBufMut for std::io::BorrowedBuf<'static, u8> {
     unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let total_cap = self.capacity();
 
@@ -957,7 +1150,11 @@ impl IoBufMut for std::io::BorrowedBuf<'static, u8> {
 }
 
 #[cfg(feature = "arrayvec")]
-impl<const N: usize> IoBufMut for arrayvec::ArrayVec<u8, N> {
+// SAFETY: the pointer and length both come from one allocation this value
+// owns, so successive calls agree and `as_init` is a prefix of
+// `as_uninit` whose bytes are initialized by construction. Neither can
+// change without `&mut self`.
+unsafe impl<const N: usize> IoBufMut for arrayvec::ArrayVec<u8, N> {
     unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         // SAFETY:
@@ -985,7 +1182,11 @@ impl<const N: usize> IoBufMut for arrayvec::ArrayVec<u8, N> {
 }
 
 #[cfg(feature = "smallvec")]
-impl<const N: usize> IoBufMut for smallvec::SmallVec<[u8; N]>
+// SAFETY: the pointer and length both come from one allocation this value
+// owns, so successive calls agree and `as_init` is a prefix of
+// `as_uninit` whose bytes are initialized by construction. Neither can
+// change without `&mut self`.
+unsafe impl<const N: usize> IoBufMut for smallvec::SmallVec<[u8; N]>
 where
     [u8; N]: smallvec::Array<Item = u8>,
 {
@@ -1046,7 +1247,10 @@ where
 }
 
 #[cfg(feature = "memmap2")]
-impl IoBufMut for memmap2::MmapMut {
+// SAFETY: a memory mapping's address and length are fixed for its lifetime,
+// and the whole mapping is initialized, so every call agrees and the
+// initialized prefix covers it.
+unsafe impl IoBufMut for memmap2::MmapMut {
     unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         // SAFETY:
         // Operation: `core::mem::transmute::<&mut [u8], &mut
@@ -1067,7 +1271,23 @@ impl IoBufMut for memmap2::MmapMut {
 }
 
 /// A helper trait for `set_len` like methods.
-pub trait SetLen {
+///
+/// # Safety
+///
+/// `set_len` moves the boundary that [`IoBuf`] and [`IoBufMut`] are defined
+/// against, so it can break their obligations from the outside. Implementors
+/// must ensure that after any call whose own contract was met, the type still
+/// satisfies those obligations -- in particular that `as_init()` never reports
+/// a byte that is not initialized, and never extends past `as_uninit()`.
+///
+/// It is *not* required that `as_init().len()` afterwards equal the `len`
+/// passed in. A fixed-size buffer that is always fully initialized, such as
+/// `[u8; N]` or a memory mapping, correctly ignores the value: its initialized
+/// prefix is the whole buffer no matter what any caller asks for, and the
+/// number of bytes an operation actually transferred is carried separately in
+/// the `BufResult`. What such an implementation must not do is the reverse --
+/// report a longer initialized prefix than it has.
+pub unsafe trait SetLen {
     /// Set the buffer length.
     ///
     /// # Safety
@@ -1176,7 +1396,10 @@ pub trait SetLenExt: SetLen {
 
 impl<B: SetLen + ?Sized> SetLenExt for B {}
 
-impl<B: SetLen + ?Sized> SetLen for &'static mut B {
+// SAFETY: forwards to the wrapped buffer's implementation, which carries
+// the same obligations. This wrapper stores no pointer or length of its
+// own, so it cannot make successive calls disagree.
+unsafe impl<B: SetLen + ?Sized> SetLen for &'static mut B {
     unsafe fn set_len(&mut self, len: usize) {
         // SAFETY:
         // Operation: `<B as SetLen>::set_len(len)` on the wrapped buffer.
@@ -1193,7 +1416,10 @@ impl<B: SetLen + ?Sized> SetLen for &'static mut B {
     }
 }
 
-impl<B: SetLen + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> SetLen
+// SAFETY: forwards to the wrapped buffer's implementation, which carries
+// the same obligations. This wrapper stores no pointer or length of its
+// own, so it cannot make successive calls disagree.
+unsafe impl<B: SetLen + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> SetLen
     for t_alloc!(Box, B, A)
 {
     unsafe fn set_len(&mut self, len: usize) {
@@ -1212,7 +1438,12 @@ impl<B: SetLen + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'stati
     }
 }
 
-impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> SetLen for t_alloc!(Vec, u8, A) {
+// SAFETY: moves the same length `as_init` reports, using the inherent
+// `set_len` of a type whose buffer is one owned allocation, so `IoBufMut`'s
+// containment and initialized-prefix obligations continue to hold.
+unsafe impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> SetLen
+    for t_alloc!(Vec, u8, A)
+{
     unsafe fn set_len(&mut self, len: usize) {
         // SAFETY:
         // Operation: `Vec::<u8>::set_len`, the inherent method, not the trait
@@ -1228,20 +1459,31 @@ impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> SetLen for t_allo
     }
 }
 
-impl SetLen for [u8] {
+// SAFETY: a fixed-size buffer that is always fully initialized, so its
+// initialized prefix is the whole buffer and there is no boundary to move.
+// Ignoring `len` cannot make `as_init` report an uninitialized byte or exceed
+// `as_uninit`, which is what this trait actually requires.
+unsafe impl SetLen for [u8] {
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= self.len());
     }
 }
 
-impl<const N: usize> SetLen for [u8; N] {
+// SAFETY: a fixed-size buffer that is always fully initialized, so its
+// initialized prefix is the whole buffer and there is no boundary to move.
+// Ignoring `len` cannot make `as_init` report an uninitialized byte or exceed
+// `as_uninit`, which is what this trait actually requires.
+unsafe impl<const N: usize> SetLen for [u8; N] {
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= N);
     }
 }
 
 #[cfg(feature = "bytes")]
-impl SetLen for bytes::BytesMut {
+// SAFETY: moves the same length `as_init` reports, using the inherent
+// `set_len` of a type whose buffer is one owned allocation, so `IoBufMut`'s
+// containment and initialized-prefix obligations continue to hold.
+unsafe impl SetLen for bytes::BytesMut {
     unsafe fn set_len(&mut self, len: usize) {
         // SAFETY:
         // Operation: `BytesMut::set_len`, the inherent method, not the trait
@@ -1258,7 +1500,10 @@ impl SetLen for bytes::BytesMut {
 }
 
 #[cfg(feature = "read_buf")]
-impl SetLen for std::io::BorrowedBuf<'static, u8> {
+// SAFETY: moves the same length `as_init` reports, using the inherent
+// `set_len` of a type whose buffer is one owned allocation, so `IoBufMut`'s
+// containment and initialized-prefix obligations continue to hold.
+unsafe impl SetLen for std::io::BorrowedBuf<'static, u8> {
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(self.capacity() >= len);
 
@@ -1286,7 +1531,10 @@ impl SetLen for std::io::BorrowedBuf<'static, u8> {
 }
 
 #[cfg(feature = "arrayvec")]
-impl<const N: usize> SetLen for arrayvec::ArrayVec<u8, N> {
+// SAFETY: moves the same length `as_init` reports, using the inherent
+// `set_len` of a type whose buffer is one owned allocation, so `IoBufMut`'s
+// containment and initialized-prefix obligations continue to hold.
+unsafe impl<const N: usize> SetLen for arrayvec::ArrayVec<u8, N> {
     unsafe fn set_len(&mut self, len: usize) {
         if (**self).buf_len() < len {
             // SAFETY:
@@ -1303,7 +1551,10 @@ impl<const N: usize> SetLen for arrayvec::ArrayVec<u8, N> {
 }
 
 #[cfg(feature = "smallvec")]
-impl<const N: usize> SetLen for smallvec::SmallVec<[u8; N]>
+// SAFETY: moves the same length `as_init` reports, using the inherent
+// `set_len` of a type whose buffer is one owned allocation, so `IoBufMut`'s
+// containment and initialized-prefix obligations continue to hold.
+unsafe impl<const N: usize> SetLen for smallvec::SmallVec<[u8; N]>
 where
     [u8; N]: smallvec::Array<Item = u8>,
 {
@@ -1323,13 +1574,21 @@ where
 }
 
 #[cfg(feature = "memmap2")]
-impl SetLen for memmap2::MmapMut {
+// SAFETY: a fixed-size buffer that is always fully initialized, so its
+// initialized prefix is the whole buffer and there is no boundary to move.
+// Ignoring `len` cannot make `as_init` report an uninitialized byte or exceed
+// `as_uninit`, which is what this trait actually requires.
+unsafe impl SetLen for memmap2::MmapMut {
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= self.len())
     }
 }
 
-impl<T: IoBufMut> SetLen for [T] {
+// SAFETY: distributes the length across the element buffers in the same
+// order `iter_slice` yields them, so it moves exactly the boundary
+// `IoVectoredBuf` is defined against, and defers to each element's own
+// `set_len` for the per-buffer part.
+unsafe impl<T: IoBufMut> SetLen for [T] {
     unsafe fn set_len(&mut self, len: usize) {
         // SAFETY:
         // Operation: `default_set_len(self.iter_mut(), len)`.
@@ -1349,7 +1608,11 @@ impl<T: IoBufMut> SetLen for [T] {
     }
 }
 
-impl<T: IoBufMut, const N: usize> SetLen for [T; N] {
+// SAFETY: distributes the length across the element buffers in the same
+// order `iter_slice` yields them, so it moves exactly the boundary
+// `IoVectoredBuf` is defined against, and defers to each element's own
+// `set_len` for the per-buffer part.
+unsafe impl<T: IoBufMut, const N: usize> SetLen for [T; N] {
     unsafe fn set_len(&mut self, len: usize) {
         // SAFETY: the `[T]` impl above, unchanged: `iter_mut()` yields each
         // element exactly once in order, so the caller's sum-of-capacities
@@ -1358,7 +1621,11 @@ impl<T: IoBufMut, const N: usize> SetLen for [T; N] {
     }
 }
 
-impl<T: IoBufMut, #[cfg(feature = "allocator_api")] A: Allocator + 'static> SetLen
+// SAFETY: distributes the length across the element buffers in the same
+// order `iter_slice` yields them, so it moves exactly the boundary
+// `IoVectoredBuf` is defined against, and defers to each element's own
+// `set_len` for the per-buffer part.
+unsafe impl<T: IoBufMut, #[cfg(feature = "allocator_api")] A: Allocator + 'static> SetLen
     for t_alloc!(Vec, T, A)
 {
     unsafe fn set_len(&mut self, len: usize) {
@@ -1370,7 +1637,11 @@ impl<T: IoBufMut, #[cfg(feature = "allocator_api")] A: Allocator + 'static> SetL
 }
 
 #[cfg(feature = "arrayvec")]
-impl<T: IoBufMut, const N: usize> SetLen for arrayvec::ArrayVec<T, N> {
+// SAFETY: distributes the length across the element buffers in the same
+// order `iter_slice` yields them, so it moves exactly the boundary
+// `IoVectoredBuf` is defined against, and defers to each element's own
+// `set_len` for the per-buffer part.
+unsafe impl<T: IoBufMut, const N: usize> SetLen for arrayvec::ArrayVec<T, N> {
     unsafe fn set_len(&mut self, len: usize) {
         // SAFETY: the `[T]` impl above, unchanged: `iter_mut()` yields each
         // element exactly once in order, so the caller's sum-of-capacities
@@ -1380,7 +1651,11 @@ impl<T: IoBufMut, const N: usize> SetLen for arrayvec::ArrayVec<T, N> {
 }
 
 #[cfg(feature = "smallvec")]
-impl<T: IoBufMut, const N: usize> SetLen for smallvec::SmallVec<[T; N]>
+// SAFETY: distributes the length across the element buffers in the same
+// order `iter_slice` yields them, so it moves exactly the boundary
+// `IoVectoredBuf` is defined against, and defers to each element's own
+// `set_len` for the per-buffer part.
+unsafe impl<T: IoBufMut, const N: usize> SetLen for smallvec::SmallVec<[T; N]>
 where
     [T; N]: smallvec::Array<Item = T>,
 {
@@ -1534,26 +1809,40 @@ mod soundness_tests {
 
     use crate::*;
 
-    /// `IoBuf`/`IoBufMut` are safe traits, so an implementation can report a
-    /// longer initialized prefix than it actually exposes. `as_mut_slice` used
-    /// to build a slice from `buf_len()` and `as_uninit()`'s pointer, which put
-    /// the resulting `&mut [u8]` past the end of the allocation. It now clamps.
+    /// An implementation that reports a longer initialized prefix than it
+    /// exposes now breaks `IoBufMut`'s containment obligation, so this type is
+    /// deliberately unsound -- it exists to prove the clamp holds anyway.
+    /// `as_mut_slice` used to build a slice from `buf_len()` and
+    /// `as_uninit()`'s pointer, which put the resulting `&mut [u8]` past the
+    /// end of the allocation.
     struct Inconsistent {
         storage: [MaybeUninit<u8>; 8],
         claimed: Vec<u8>,
     }
 
-    impl IoBuf for Inconsistent {
+    // SAFETY: NOT satisfied, on purpose. This type breaks `IoBufMut`'s
+    // containment obligation so the test can prove the defensive clamp holds
+    // when an implementation gets it wrong. It is private to this test module
+    // and must never be used as an example of a correct implementation.
+    unsafe impl IoBuf for Inconsistent {
         fn as_init(&self) -> &[u8] {
             &self.claimed
         }
     }
 
-    impl SetLen for Inconsistent {
+    // SAFETY: NOT satisfied, on purpose. This type breaks `IoBufMut`'s
+    // containment obligation so the test can prove the defensive clamp holds
+    // when an implementation gets it wrong. It is private to this test module
+    // and must never be used as an example of a correct implementation.
+    unsafe impl SetLen for Inconsistent {
         unsafe fn set_len(&mut self, _len: usize) {}
     }
 
-    impl IoBufMut for Inconsistent {
+    // SAFETY: NOT satisfied, on purpose. This type breaks `IoBufMut`'s
+    // containment obligation so the test can prove the defensive clamp holds
+    // when an implementation gets it wrong. It is private to this test module
+    // and must never be used as an example of a correct implementation.
+    unsafe impl IoBufMut for Inconsistent {
         unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
             &mut self.storage
         }
@@ -1597,25 +1886,40 @@ mod tests_disagree_extend {
     use crate::*;
 
     /// A buffer whose two halves describe different memory: `as_init` reports
-    /// a real 1000-byte allocation, `as_uninit` a real 8-byte one. Both
-    /// slices are valid, so the type itself is not UB -- the two methods
-    /// simply disagree, which safe code is free to do.
+    /// a real 1000-byte allocation, `as_uninit` a real 8-byte one. Both slices
+    /// are valid, so the type itself is not UB -- the two methods simply
+    /// disagree, which breaks `IoBufMut`'s containment obligation. This type
+    /// is deliberately contract-violating: it exists to prove that `reserve`
+    /// and `extend_from_slice` refuse rather than write out of bounds when an
+    /// implementation gets it wrong.
     struct Inconsistent {
         init: Vec<u8>,
         uninit: [u8; 8],
     }
 
-    impl IoBuf for Inconsistent {
+    // SAFETY: NOT satisfied, on purpose. This type breaks `IoBufMut`'s
+    // containment obligation so the test can prove the defensive clamp holds
+    // when an implementation gets it wrong. It is private to this test module
+    // and must never be used as an example of a correct implementation.
+    unsafe impl IoBuf for Inconsistent {
         fn as_init(&self) -> &[u8] {
             &self.init
         }
     }
 
-    impl SetLen for Inconsistent {
+    // SAFETY: NOT satisfied, on purpose. This type breaks `IoBufMut`'s
+    // containment obligation so the test can prove the defensive clamp holds
+    // when an implementation gets it wrong. It is private to this test module
+    // and must never be used as an example of a correct implementation.
+    unsafe impl SetLen for Inconsistent {
         unsafe fn set_len(&mut self, _len: usize) {}
     }
 
-    impl IoBufMut for Inconsistent {
+    // SAFETY: NOT satisfied, on purpose. This type breaks `IoBufMut`'s
+    // containment obligation so the test can prove the defensive clamp holds
+    // when an implementation gets it wrong. It is private to this test module
+    // and must never be used as an example of a correct implementation.
+    unsafe impl IoBufMut for Inconsistent {
         unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
             // SAFETY: `self.uninit` is a live `[u8; 8]` borrowed mutably for
             // the returned lifetime, and every `u8` is a valid
@@ -1648,5 +1952,94 @@ mod tests_disagree_extend {
             uninit: [0; 8],
         };
         assert!(buf.reserve(4).is_err());
+    }
+}
+
+#[cfg(test)]
+mod contract_tests {
+    use crate::*;
+
+    /// Check the `IoBuf`/`IoBufMut` obligations empirically for one value.
+    ///
+    /// Stability is the obligation that bug 2b turned into a kernel-visible
+    /// bug, and containment is the one bug 2a and 2c turned into out-of-bounds
+    /// writes. Both are mechanically checkable, so an implementation added
+    /// later that breaks either fails here rather than in someone's IO path.
+    fn assert_obligations<B: IoBufMut>(mut buf: B, what: &str) {
+        let (p1, l1) = {
+            let s = buf.as_init();
+            (s.as_ptr(), s.len())
+        };
+        let (p2, l2) = {
+            let s = buf.as_init();
+            (s.as_ptr(), s.len())
+        };
+        assert_eq!((p1, l1), (p2, l2), "{what}: as_init is not stable");
+
+        let (q1, c1) = {
+            // SAFETY: nothing is written through the slice; it is only
+            // measured, so no byte below `buf_len()` is de-initialized.
+            let s = unsafe { buf.as_uninit() };
+            (s.as_ptr(), s.len())
+        };
+        let (q2, c2) = {
+            // SAFETY: as above.
+            let s = unsafe { buf.as_uninit() };
+            (s.as_ptr(), s.len())
+        };
+        assert_eq!((q1, c1), (q2, c2), "{what}: as_uninit is not stable");
+
+        assert!(
+            l1 <= c1,
+            "{what}: containment broken -- as_init reports {l1} bytes but as_uninit exposes only \
+             {c1}"
+        );
+
+        // The form unsafe code actually relies on: this must not panic, and
+        // the bytes it yields must be the initialized prefix.
+        assert_eq!(buf.as_mut_slice().len(), l1, "{what}: as_mut_slice length");
+    }
+
+    #[test]
+    fn in_tree_impls_uphold_their_obligations() {
+        assert_obligations(vec![1u8, 2, 3], "Vec<u8>");
+        assert_obligations(Vec::<u8>::with_capacity(16), "Vec<u8> (spare cap)");
+        assert_obligations([0u8; 8], "[u8; 8]");
+        assert_obligations(vec![0u8; 4].into_boxed_slice(), "Box<[u8]>");
+        assert_obligations(Box::new(vec![1u8, 2]), "Box<Vec<u8>>");
+        assert_obligations(vec![1u8, 2, 3].slice(1..), "Slice<Vec<u8>>");
+        assert_obligations(Vec::<u8>::with_capacity(8).uninit(), "Uninit<Vec<u8>>");
+
+        // Partially filled, so `capacity() > len() > 0`. This is the shape a
+        // read buffer actually has, and the one that caught `BytesMut`
+        // deriving its pointer through `DerefMut`: provenance covered `len()`
+        // bytes while the slice claimed `capacity()`.
+        let mut partial = Vec::<u8>::with_capacity(16);
+        partial.extend_from_slice(b"abc");
+        assert_obligations(partial, "Vec<u8> (partially filled)");
+
+        #[cfg(feature = "bytes")]
+        {
+            assert_obligations(bytes::BytesMut::with_capacity(8), "BytesMut (empty)");
+            let mut b = bytes::BytesMut::with_capacity(16);
+            b.extend_from_slice(b"abc");
+            assert_obligations(b, "BytesMut (partially filled)");
+        }
+        #[cfg(feature = "arrayvec")]
+        {
+            assert_obligations(arrayvec::ArrayVec::<u8, 8>::new(), "ArrayVec (empty)");
+            let mut a = arrayvec::ArrayVec::<u8, 8>::new();
+            a.try_extend_from_slice(b"abc").unwrap();
+            assert_obligations(a, "ArrayVec (partially filled)");
+        }
+        #[cfg(feature = "smallvec")]
+        {
+            assert_obligations(smallvec::SmallVec::<[u8; 8]>::new(), "SmallVec (inline)");
+            // Spilled to the heap, where the storage is no longer covered by
+            // the struct's own borrow.
+            let mut sv = smallvec::SmallVec::<[u8; 4]>::new();
+            sv.extend_from_slice(b"abcdefghij");
+            assert_obligations(sv, "SmallVec (spilled to heap)");
+        }
     }
 }

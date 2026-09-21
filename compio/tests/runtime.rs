@@ -51,13 +51,13 @@ async fn drop_on_complete() {
         _ref_cnt: Arc<()>,
     }
 
-    impl IoBuf for MyBuf {
+    unsafe impl IoBuf for MyBuf {
         fn as_init(&self) -> &[u8] {
             self.data.as_slice()
         }
     }
 
-    impl IoBufMut for MyBuf {
+    unsafe impl IoBufMut for MyBuf {
         unsafe fn as_uninit(&mut self) -> &mut [std::mem::MaybeUninit<u8>] {
             // SAFETY: the wrapper exposes `data`'s bytes unchanged at the same
             // indices, so this method's contract is `Vec`'s verbatim.
@@ -65,7 +65,7 @@ async fn drop_on_complete() {
         }
     }
 
-    impl SetLen for MyBuf {
+    unsafe impl SetLen for MyBuf {
         unsafe fn set_len(&mut self, pos: usize) {
             unsafe { self.data.set_len(pos) }
         }

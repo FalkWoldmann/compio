@@ -197,13 +197,19 @@ impl<T: IoBufMut> DerefMut for Slice<T> {
     }
 }
 
-impl<T: IoBuf> IoBuf for Slice<T> {
+// SAFETY: views a fixed sub-range of the wrapped buffer. `begin` and `end`
+// cannot change without `&mut self`, so the view is stable, and the wrapped
+// buffer supplies validity of the bytes inside it.
+unsafe impl<T: IoBuf> IoBuf for Slice<T> {
     fn as_init(&self) -> &[u8] {
         self.deref()
     }
 }
 
-impl<T: IoBufMut> IoBufMut for Slice<T> {
+// SAFETY: as for the `IoBuf` impl -- a fixed sub-range of a buffer that
+// already meets these obligations. The range starts at `begin` for both
+// `as_init` and `as_uninit`, so containment is preserved.
+unsafe impl<T: IoBufMut> IoBufMut for Slice<T> {
     unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let range = self.range();
         // SAFETY:
@@ -241,7 +247,10 @@ impl<T: IoBufMut> IoBufMut for Slice<T> {
     }
 }
 
-impl<T: SetLen> SetLen for Slice<T> {
+// SAFETY: shifts the length by the fixed `begin` offset and defers to the
+// wrapped buffer's `set_len`, so it moves the same boundary `as_init`
+// reports through this view.
+unsafe impl<T: SetLen> SetLen for Slice<T> {
     unsafe fn set_len(&mut self, len: usize) {
         // SAFETY:
         // Operation: `SetLen::set_len(self.begin + len)` on the underlying
@@ -336,7 +345,10 @@ impl<T> VectoredSlice<T> {
     }
 }
 
-impl<T: IoVectoredBuf> IoVectoredBuf for VectoredSlice<T> {
+// SAFETY: forwards to the wrapped buffer's implementation, which carries
+// the same obligations. This wrapper stores no pointer or length of its
+// own, so it cannot make successive calls disagree.
+unsafe impl<T: IoVectoredBuf> IoVectoredBuf for VectoredSlice<T> {
     fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
         let mut offset = self.offset;
         self.buf.iter_slice().skip(self.idx).map(move |buf| {
@@ -347,7 +359,9 @@ impl<T: IoVectoredBuf> IoVectoredBuf for VectoredSlice<T> {
     }
 }
 
-impl<T: SetLen> SetLen for VectoredSlice<T> {
+// SAFETY: shifts by the fixed `begin` offset and defers to the wrapped
+// vectored buffer's `set_len`.
+unsafe impl<T: SetLen> SetLen for VectoredSlice<T> {
     unsafe fn set_len(&mut self, len: usize) {
         // SAFETY:
         // Operation: `SetLen::set_len(self.begin + len)` on the underlying
@@ -367,7 +381,10 @@ impl<T: SetLen> SetLen for VectoredSlice<T> {
     }
 }
 
-impl<T: IoVectoredBufMut> IoVectoredBufMut for VectoredSlice<T> {
+// SAFETY: forwards to the wrapped buffer's implementation, which carries
+// the same obligations. This wrapper stores no pointer or length of its
+// own, so it cannot make successive calls disagree.
+unsafe impl<T: IoVectoredBufMut> IoVectoredBufMut for VectoredSlice<T> {
     unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
         let mut offset = self.offset;
         // SAFETY:

@@ -36,13 +36,20 @@ impl<T> Uninit<T> {
     }
 }
 
-impl<T: IoBuf> IoBuf for Uninit<T> {
+// SAFETY: forwards to the wrapped buffer, which meets these obligations.
+// The result is always empty, but is taken from the wrapped buffer so that
+// its pointer stays the one `as_uninit` is a prefix of.
+unsafe impl<T: IoBuf> IoBuf for Uninit<T> {
     fn as_init(&self) -> &[u8] {
         self.0.as_init() // this is always &[] but we can't return &[] since the pointer will be different
     }
 }
 
-impl<T: IoBufMut> IoBufMut for Uninit<T> {
+// SAFETY: views the wrapped buffer's spare capacity. The split point is the
+// wrapped buffer's own `buf_len()`, which is stable while borrowed, so the
+// view is stable; it contains no initialized bytes, so containment against
+// the empty `as_init` holds trivially.
+unsafe impl<T: IoBufMut> IoBufMut for Uninit<T> {
     unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let len = (*self).buf_len();
         // SAFETY:
@@ -68,7 +75,9 @@ impl<T: IoBufMut> IoBufMut for Uninit<T> {
     }
 }
 
-impl<T: SetLen + IoBuf> SetLen for Uninit<T> {
+// SAFETY: defers to the wrapped buffer's `set_len`, which moves the
+// boundary this view is defined against.
+unsafe impl<T: SetLen + IoBuf> SetLen for Uninit<T> {
     unsafe fn set_len(&mut self, len: usize) {
         // SAFETY:
         // Operation: `SetLen::set_len(len)` on the inner buffer.

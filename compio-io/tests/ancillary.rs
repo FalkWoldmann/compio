@@ -61,19 +61,19 @@ fn test_custom_buffer_cmsg() {
         inner: T,
     }
 
-    impl<T: AsRef<[MaybeUninit<u8>]> + ?Sized + 'static> IoBuf for MaybeUninitBuffer<T> {
+    unsafe impl<T: AsRef<[MaybeUninit<u8>]> + ?Sized + 'static> IoBuf for MaybeUninitBuffer<T> {
         fn as_init(&self) -> &[u8] {
             unsafe { self.inner.as_ref()[..self.len].assume_init_ref() }
         }
     }
 
-    impl<T: ?Sized> SetLen for MaybeUninitBuffer<T> {
+    unsafe impl<T: ?Sized> SetLen for MaybeUninitBuffer<T> {
         unsafe fn set_len(&mut self, new_len: usize) {
             self.len = new_len;
         }
     }
 
-    impl<T: AsRef<[MaybeUninit<u8>]> + AsMut<[MaybeUninit<u8>]> + ?Sized + 'static> IoBufMut
+    unsafe impl<T: AsRef<[MaybeUninit<u8>]> + AsMut<[MaybeUninit<u8>]> + ?Sized + 'static> IoBufMut
         for MaybeUninitBuffer<T>
     {
         unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {

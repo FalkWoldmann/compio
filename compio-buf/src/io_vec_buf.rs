@@ -4,12 +4,19 @@ use crate::{IntoInner, IoBuf, IoBufMut, IoBufMutExt, SetLen, VectoredSlice, t_al
 
 /// A trait for vectored buffers.
 ///
-/// # Note for implementors
+/// # Safety
 ///
-/// The iterator must be idemptotent and always yield the same slices in the
-/// exact same orders, i.e., [`Iterator::enumerate`] will mark the same buffer
-/// with same index.
-pub trait IoVectoredBuf: 'static {
+/// The slices this yields become an `iovec` array passed to the kernel, so the
+/// idempotency below is a memory-safety obligation rather than a convention.
+/// Implementors must ensure:
+///
+/// 1. **Idempotency.** The iterator always yields the same slices in the exact
+///    same order, i.e. [`Iterator::enumerate`] marks the same buffer with the
+///    same index, until the buffer is mutated through `&mut self`. Unsafe code
+///    builds an `iovec` array from one traversal and resolves completions
+///    against another.
+/// 2. **Validity.** Every yielded slice satisfies [`IoBuf`]'s obligations.
+pub unsafe trait IoVectoredBuf: 'static {
     /// An iterator of initialized slice of the buffers.
     fn iter_slice(&self) -> impl Iterator<Item = &[u8]>;
 
@@ -79,26 +86,42 @@ pub trait IoVectoredBuf: 'static {
     }
 }
 
-impl<T: IoBuf> IoVectoredBuf for &'static [T] {
+// SAFETY: iterates the container in index order, yielding each element's
+// own slice. The container's length and element identity are fixed while
+// borrowed, so every traversal yields the same slices in the same order,
+// and each element's implementation supplies the per-slice guarantees.
+unsafe impl<T: IoBuf> IoVectoredBuf for &'static [T] {
     fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
         self.iter().map(|buf| buf.as_init())
     }
 }
 
-impl<T: IoBuf> IoVectoredBuf for &'static mut [T] {
+// SAFETY: iterates the container in index order, yielding each element's
+// own slice. The container's length and element identity are fixed while
+// borrowed, so every traversal yields the same slices in the same order,
+// and each element's implementation supplies the per-slice guarantees.
+unsafe impl<T: IoBuf> IoVectoredBuf for &'static mut [T] {
     fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
         self.iter().map(|buf| buf.as_init())
     }
 }
 
-impl<T: IoBuf, const N: usize> IoVectoredBuf for [T; N] {
+// SAFETY: iterates the container in index order, yielding each element's
+// own slice. The container's length and element identity are fixed while
+// borrowed, so every traversal yields the same slices in the same order,
+// and each element's implementation supplies the per-slice guarantees.
+unsafe impl<T: IoBuf, const N: usize> IoVectoredBuf for [T; N] {
     fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
         self.iter().map(|buf| buf.as_init())
     }
 }
 
-impl<T: IoBuf, #[cfg(feature = "allocator_api")] A: std::alloc::Allocator + 'static> IoVectoredBuf
-    for t_alloc!(Vec, T, A)
+// SAFETY: iterates the container in index order, yielding each element's
+// own slice. The container's length and element identity are fixed while
+// borrowed, so every traversal yields the same slices in the same order,
+// and each element's implementation supplies the per-slice guarantees.
+unsafe impl<T: IoBuf, #[cfg(feature = "allocator_api")] A: std::alloc::Allocator + 'static>
+    IoVectoredBuf for t_alloc!(Vec, T, A)
 {
     fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
         self.iter().map(|buf| buf.as_init())
@@ -106,14 +129,22 @@ impl<T: IoBuf, #[cfg(feature = "allocator_api")] A: std::alloc::Allocator + 'sta
 }
 
 #[cfg(feature = "arrayvec")]
-impl<T: IoBuf, const N: usize> IoVectoredBuf for arrayvec::ArrayVec<T, N> {
+// SAFETY: iterates the container in index order, yielding each element's
+// own slice. The container's length and element identity are fixed while
+// borrowed, so every traversal yields the same slices in the same order,
+// and each element's implementation supplies the per-slice guarantees.
+unsafe impl<T: IoBuf, const N: usize> IoVectoredBuf for arrayvec::ArrayVec<T, N> {
     fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
         self.iter().map(|buf| buf.as_init())
     }
 }
 
 #[cfg(feature = "smallvec")]
-impl<T: IoBuf, const N: usize> IoVectoredBuf for smallvec::SmallVec<[T; N]>
+// SAFETY: iterates the container in index order, yielding each element's
+// own slice. The container's length and element identity are fixed while
+// borrowed, so every traversal yields the same slices in the same order,
+// and each element's implementation supplies the per-slice guarantees.
+unsafe impl<T: IoBuf, const N: usize> IoVectoredBuf for smallvec::SmallVec<[T; N]>
 where
     [T; N]: smallvec::Array<Item = T>,
 {
@@ -122,26 +153,67 @@ where
     }
 }
 
-impl<T: IoBuf, Rest: IoVectoredBuf> IoVectoredBuf for (T, Rest) {
+// SAFETY: walks the cons list in a fixed order, so every traversal yields
+// the same slices with the same indices; each element's implementation
+// supplies the per-slice guarantees.
+unsafe impl<T: IoBuf, Rest: IoVectoredBuf> IoVectoredBuf for (T, Rest) {
     fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
         std::iter::once(self.0.as_init()).chain(self.1.iter_slice())
     }
 }
 
-impl<T: IoBuf> IoVectoredBuf for (T,) {
+// SAFETY: walks the cons list in a fixed order, so every traversal yields
+// the same slices with the same indices; each element's implementation
+// supplies the per-slice guarantees.
+unsafe impl<T: IoBuf> IoVectoredBuf for (T,) {
     fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
         std::iter::once(self.0.as_init())
     }
 }
 
-impl IoVectoredBuf for () {
+// SAFETY: no buffers at all -- the iterator is empty and there is no length
+// to move.
+unsafe impl IoVectoredBuf for () {
     fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
         std::iter::empty()
     }
 }
 
+/// A static assertion that [`IoVectoredBuf`] and [`IoVectoredBufMut`] are
+/// still `unsafe trait`s. See the matching assertion in `io_buf.rs`.
+const _: () = {
+    struct Empty;
+
+    // SAFETY: yields no slices at all, so idempotency and validity hold
+    // vacuously.
+    unsafe impl IoVectoredBuf for Empty {
+        fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
+            iter::empty()
+        }
+    }
+
+    // SAFETY: as above -- there is no length to move.
+    unsafe impl SetLen for Empty {
+        unsafe fn set_len(&mut self, _len: usize) {}
+    }
+
+    // SAFETY: as above -- yields no slices.
+    unsafe impl IoVectoredBufMut for Empty {
+        unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
+            iter::empty()
+        }
+    }
+};
+
 /// A trait for mutable vectored buffers.
-pub trait IoVectoredBufMut: IoVectoredBuf + SetLen {
+///
+/// # Safety
+///
+/// In addition to [`IoVectoredBuf`]'s obligations, implementors must ensure
+/// that `iter_uninit_slice` is idempotent in the same sense, and that each
+/// yielded slice satisfies [`IoBufMut`]'s obligations against the
+/// corresponding slice from [`IoVectoredBuf::iter_slice`].
+pub unsafe trait IoVectoredBufMut: IoVectoredBuf + SetLen {
     /// An iterator of maybe uninitialized slice of the buffers.
     ///
     /// Each yielded slice spans one buffer's whole extent, initialized prefix
@@ -223,7 +295,11 @@ pub trait IoVectoredBufMut: IoVectoredBuf + SetLen {
     }
 }
 
-impl<T: IoBufMut> IoVectoredBufMut for &'static mut [T] {
+// SAFETY: iterates the container in index order, yielding each element's
+// own slice. The container's length and element identity are fixed while
+// borrowed, so every traversal yields the same slices in the same order,
+// and each element's implementation supplies the per-slice guarantees.
+unsafe impl<T: IoBufMut> IoVectoredBufMut for &'static mut [T] {
     unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
         // SAFETY:
         // Operation: `IoBufMut::as_uninit` on each element.
@@ -237,7 +313,11 @@ impl<T: IoBufMut> IoVectoredBufMut for &'static mut [T] {
     }
 }
 
-impl<T: IoBufMut, const N: usize> IoVectoredBufMut for [T; N] {
+// SAFETY: iterates the container in index order, yielding each element's
+// own slice. The container's length and element identity are fixed while
+// borrowed, so every traversal yields the same slices in the same order,
+// and each element's implementation supplies the per-slice guarantees.
+unsafe impl<T: IoBufMut, const N: usize> IoVectoredBufMut for [T; N] {
     unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
         // SAFETY:
         // Operation: `IoBufMut::as_uninit` on each element.
@@ -251,7 +331,11 @@ impl<T: IoBufMut, const N: usize> IoVectoredBufMut for [T; N] {
     }
 }
 
-impl<T: IoBufMut, #[cfg(feature = "allocator_api")] A: std::alloc::Allocator + 'static>
+// SAFETY: iterates the container in index order, yielding each element's
+// own slice. The container's length and element identity are fixed while
+// borrowed, so every traversal yields the same slices in the same order,
+// and each element's implementation supplies the per-slice guarantees.
+unsafe impl<T: IoBufMut, #[cfg(feature = "allocator_api")] A: std::alloc::Allocator + 'static>
     IoVectoredBufMut for t_alloc!(Vec, T, A)
 {
     unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
@@ -268,7 +352,11 @@ impl<T: IoBufMut, #[cfg(feature = "allocator_api")] A: std::alloc::Allocator + '
 }
 
 #[cfg(feature = "arrayvec")]
-impl<T: IoBufMut, const N: usize> IoVectoredBufMut for arrayvec::ArrayVec<T, N> {
+// SAFETY: iterates the container in index order, yielding each element's
+// own slice. The container's length and element identity are fixed while
+// borrowed, so every traversal yields the same slices in the same order,
+// and each element's implementation supplies the per-slice guarantees.
+unsafe impl<T: IoBufMut, const N: usize> IoVectoredBufMut for arrayvec::ArrayVec<T, N> {
     unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
         // SAFETY:
         // Operation: `IoBufMut::as_uninit` on each element.
@@ -283,7 +371,11 @@ impl<T: IoBufMut, const N: usize> IoVectoredBufMut for arrayvec::ArrayVec<T, N> 
 }
 
 #[cfg(feature = "smallvec")]
-impl<T: IoBufMut, const N: usize> IoVectoredBufMut for smallvec::SmallVec<[T; N]>
+// SAFETY: iterates the container in index order, yielding each element's
+// own slice. The container's length and element identity are fixed while
+// borrowed, so every traversal yields the same slices in the same order,
+// and each element's implementation supplies the per-slice guarantees.
+unsafe impl<T: IoBufMut, const N: usize> IoVectoredBufMut for smallvec::SmallVec<[T; N]>
 where
     [T; N]: smallvec::Array<Item = T>,
 {
@@ -300,7 +392,10 @@ where
     }
 }
 
-impl<T: IoBufMut, Rest: IoVectoredBufMut> IoVectoredBufMut for (T, Rest) {
+// SAFETY: walks the cons list in a fixed order, so every traversal yields
+// the same slices with the same indices; each element's implementation
+// supplies the per-slice guarantees.
+unsafe impl<T: IoBufMut, Rest: IoVectoredBufMut> IoVectoredBufMut for (T, Rest) {
     unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
         let (h, t) = self;
         // SAFETY: the head's slice and the tail's slices are this tuple's own
@@ -310,7 +405,10 @@ impl<T: IoBufMut, Rest: IoVectoredBufMut> IoVectoredBufMut for (T, Rest) {
     }
 }
 
-impl<T: IoBufMut> IoVectoredBufMut for (T,) {
+// SAFETY: walks the cons list in a fixed order, so every traversal yields
+// the same slices with the same indices; each element's implementation
+// supplies the per-slice guarantees.
+unsafe impl<T: IoBufMut> IoVectoredBufMut for (T,) {
     unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
         // SAFETY: a one-tuple's only buffer is its element, so the contract
         // transfers verbatim.
@@ -318,13 +416,18 @@ impl<T: IoBufMut> IoVectoredBufMut for (T,) {
     }
 }
 
-impl IoVectoredBufMut for () {
+// SAFETY: no buffers at all -- the iterator is empty and there is no length
+// to move.
+unsafe impl IoVectoredBufMut for () {
     unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
         iter::empty()
     }
 }
 
-impl<T: IoBufMut, Rest: IoVectoredBufMut> SetLen for (T, Rest) {
+// SAFETY: walks the cons list in a fixed order, so every traversal yields
+// the same slices with the same indices; each element's implementation
+// supplies the per-slice guarantees.
+unsafe impl<T: IoBufMut, Rest: IoVectoredBufMut> SetLen for (T, Rest) {
     unsafe fn set_len(&mut self, len: usize) {
         let head_len = std::cmp::min(len, self.0.buf_capacity());
         let rest_len = len - head_len;
@@ -362,7 +465,10 @@ impl<T: IoBufMut, Rest: IoVectoredBufMut> SetLen for (T, Rest) {
     }
 }
 
-impl<T: IoBufMut> SetLen for (T,) {
+// SAFETY: walks the cons list in a fixed order, so every traversal yields
+// the same slices with the same indices; each element's implementation
+// supplies the per-slice guarantees.
+unsafe impl<T: IoBufMut> SetLen for (T,) {
     unsafe fn set_len(&mut self, len: usize) {
         // SAFETY:
         // Operation: `SetLen::set_len(len)` on the single element.
@@ -378,7 +484,9 @@ impl<T: IoBufMut> SetLen for (T,) {
     }
 }
 
-impl SetLen for () {
+// SAFETY: no buffers at all -- the iterator is empty and there is no length
+// to move.
+unsafe impl SetLen for () {
     unsafe fn set_len(&mut self, len: usize) {
         assert_eq!(len, 0, "set_len called with non-zero len on empty buffer");
     }
@@ -436,7 +544,11 @@ impl<T> IntoInner for VectoredBufIter<T> {
     }
 }
 
-impl<T: IoVectoredBuf> IoBuf for VectoredBufIter<T> {
+// SAFETY: yields the element at `index`, offset by `filled`. Both are
+// plain fields that cannot change without `&mut self`, and
+// `IoVectoredBuf`'s idempotency obligation guarantees `nth(index)` names
+// the same buffer on every call -- which is what makes this stable.
+unsafe impl<T: IoVectoredBuf> IoBuf for VectoredBufIter<T> {
     fn as_init(&self) -> &[u8] {
         let curr = self
             .buf
@@ -448,7 +560,10 @@ impl<T: IoVectoredBuf> IoBuf for VectoredBufIter<T> {
     }
 }
 
-impl<T: IoVectoredBuf + SetLen> SetLen for VectoredBufIter<T> {
+// SAFETY: translates the view's length into the underlying buffer's
+// coordinates by adding `total_filled`, then defers to its `set_len`, so it
+// moves the boundary this view reports through `as_init`.
+unsafe impl<T: IoVectoredBuf + SetLen> SetLen for VectoredBufIter<T> {
     unsafe fn set_len(&mut self, len: usize) {
         self.filled = len;
 
@@ -471,7 +586,10 @@ impl<T: IoVectoredBuf + SetLen> SetLen for VectoredBufIter<T> {
     }
 }
 
-impl<T: IoVectoredBufMut> IoBufMut for VectoredBufIter<T> {
+// SAFETY: as for the `IoBuf` impl -- the element at `index`, named through
+// `IoVectoredBufMut`'s idempotency obligation, with that element's own
+// implementation supplying containment and the initialized prefix.
+unsafe impl<T: IoVectoredBufMut> IoBufMut for VectoredBufIter<T> {
     unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         // SAFETY:
         // Operation: `IoVectoredBufMut::iter_uninit_slice`.
