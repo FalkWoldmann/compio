@@ -36,8 +36,8 @@ impl AsyncRead for Repeat {
         let len = slice.len();
         slice.fill(MaybeUninit::new(self.0));
         // SAFETY: we just initialized exactly `len` bytes in `buf` from index
-        // 0.
-        unsafe { buf.advance(len) };
+        // 0, so the buffer's new length is `len`.
+        unsafe { buf.advance_to(len) };
 
         BufResult(Ok(len), buf)
     }
@@ -87,4 +87,27 @@ impl AsyncBufRead for Repeat {
 /// ```
 pub fn repeat(byte: u8) -> Repeat {
     Repeat(byte)
+}
+
+#[cfg(test)]
+mod tests {
+    use compio_buf::IoBufExt;
+
+    use crate::AsyncRead;
+
+    /// `advance(len)` used to set the length to `buf_len() + len`, past the
+    /// capacity of a buffer that already held bytes.
+    #[test]
+    fn read_does_not_advance_past_capacity() {
+        futures_executor::block_on(async {
+            let mut v: Vec<u8> = Vec::with_capacity(13);
+            v.extend_from_slice(b"abc");
+
+            let (n, out) = crate::repeat(42).read(v).await.unwrap();
+
+            assert_eq!(n, 13, "should report the whole extent");
+            assert_eq!(out.buf_len(), 13, "length must not exceed capacity");
+            assert!(out.iter().all(|&b| b == 42), "every byte overwritten");
+        })
+    }
 }
