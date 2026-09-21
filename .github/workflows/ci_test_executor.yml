@@ -53,7 +53,7 @@ jobs:
         if: ${{ matrix.setup.target }}
         run: rustup target install ${{ matrix.setup.target }}
       - uses: taiki-e/install-action@nextest
-      - name: Test loom on ${{ matrix.setup.os }} nightly ${{ matrix.setup.target }}
+      - name: Miri and loom on ${{ matrix.setup.os }} nightly ${{ matrix.setup.target }}
         shell: bash
         run: |
           set -ex
