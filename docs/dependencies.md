@@ -74,9 +74,10 @@ and the derive itself fails because the inner foreign type does not implement
 the traits either. There is no escape hatch for a foreign type. `bytemuck`
 permits exactly this and is already a dependency.
 
-The three cases that establish it are archived at
-<https://claude.ai/artifact/GnTpXa1LkxHcTmzfCynmrg> (private) — a crate whose
-purpose is to *not* compile has nowhere to live in a workspace that must build.
+The three cases that establish it are compile-fail cases, quoted above. They
+are not checked in: a crate whose purpose is to *not* compile has nowhere to
+live in a workspace that must build, and they would need a `trybuild`-style
+harness to assert the error rather than merely provoke it.
 
 ## Not a dependency question
 

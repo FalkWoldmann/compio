@@ -397,10 +397,20 @@ needed.
 
 ## Reproducers
 
-Not in this repository: they trigger UB deliberately, and CI runs Miri.
-They are archived at
-<https://claude.ai/artifact/GnTpXa1LkxHcTmzfCynmrg> (private) and reproduce with
-`cargo miri run`.
+The UB reproducers are not checked into this repository: they trigger undefined
+behaviour deliberately, and CI runs Miri over `compio-buf`, so a committed
+reproducer would fail the build by design.
+
+Each one is quoted inline in the section that reports it, and reproduces in a
+scratch crate depending on `compio-buf`, under `cargo miri run` (bugs 1, 2a,
+2e) or `cargo miri run --release` (bug 2c, whose debug build panics on the
+capacity underflow before it reaches the out-of-bounds write).
+
+The findings that could be checked in as ordinary regression tests have been:
+`compio-buf`'s `soundness_tests`, `tests_disagree_extend` and `contract_tests`
+modules, and `compio-io`'s `util::repeat::tests`. Those assert that the fixes
+hold rather than that the bugs reproduce, so they are safe to run in CI, and
+each was verified to fail against the unfixed code.
 
 Bug 1's three reproducers — through `as_uninit`, through `iter_uninit_slice` and
 through `copy_within` — no longer compile against this branch. Each now fails
