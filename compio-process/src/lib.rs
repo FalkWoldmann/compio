@@ -1,5 +1,7 @@
 //! Process utilities based on [`std::process`].
 
+// Every `unsafe` block in this crate carries a `// SAFETY:` comment.
+#![deny(clippy::undocumented_unsafe_blocks)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(
     all(feature = "linux_pidfd", target_os = "linux"),
@@ -313,6 +315,8 @@ impl Command {
         &mut self,
         f: impl FnMut() -> io::Result<()> + Send + Sync + 'static,
     ) -> &mut Self {
+        // SAFETY: forwarded unchanged - the caller of this `unsafe fn` already
+        // promised `f` is async-signal-safe, which is the inner contract too.
         unsafe { self.0.pre_exec(f) };
         self
     }
@@ -429,6 +433,8 @@ impl TryFrom<ChildStdout> for process::Stdio {
             .into_inner()
             .try_unwrap()
             .map(Self::from)
+            // SAFETY: the fd came from an already-attached `ChildStdout`, so it is
+            // attached to this runtime.
             .map_err(|fd| ChildStdout(unsafe { Attacher::from_shared_fd_unchecked(fd) }))
     }
 }
@@ -469,6 +475,8 @@ impl TryFrom<ChildStderr> for process::Stdio {
             .into_inner()
             .try_unwrap()
             .map(Self::from)
+            // SAFETY: the fd came from an already-attached `ChildStderr`, so it is
+            // attached to this runtime.
             .map_err(|fd| ChildStderr(unsafe { Attacher::from_shared_fd_unchecked(fd) }))
     }
 }
@@ -510,6 +518,8 @@ impl TryFrom<ChildStdin> for process::Stdio {
             .into_inner()
             .try_unwrap()
             .map(Self::from)
+            // SAFETY: the fd came from an already-attached `ChildStdin`, so it is
+            // attached to this runtime.
             .map_err(|fd| ChildStdin(unsafe { Attacher::from_shared_fd_unchecked(fd) }))
     }
 }

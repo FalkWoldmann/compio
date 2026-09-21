@@ -28,6 +28,8 @@ pub async fn child_wait(child: process::Child) -> io::Result<process::ExitStatus
 
         impl AsFd for PidFdWrap {
             fn as_fd(&self) -> BorrowedFd<'_> {
+                // SAFETY: the pidfd is owned by this wrapper and the borrow is
+                // tied to `&self`, so it cannot outlive it.
                 unsafe { BorrowedFd::borrow_raw(self.fd) }
             }
         }

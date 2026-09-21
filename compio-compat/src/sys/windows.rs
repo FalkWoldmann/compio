@@ -24,10 +24,19 @@ impl WindowsAdapter {
 
     async fn wait(&self, timeout: Option<Duration>) -> io::Result<()> {
         let (sender, receiver) = futures_channel::oneshot::channel::<io::Result<()>>();
+        // SAFETY: FFI call to `CreateEventW`. Null `lpEventAttributes` and
+        // `lpName` are documented as valid (default security, unnamed event);
+        // the two `0` arguments are plain `BOOL`s. The call has no safety
+        // precondition beyond passing well-formed arguments, and its result is
+        // null-checked below.
         let event = unsafe { CreateEventW(std::ptr::null(), 0, 0, std::ptr::null()) };
         if event.is_null() {
             return Err(io::Error::last_os_error());
         }
+        // SAFETY: `OwnedHandle::from_raw_handle` requires a valid handle that
+        // this call takes sole ownership of. `event` was just returned by
+        // `CreateEventW` and checked non-null, and it is not closed or wrapped
+        // anywhere else, so ownership is unique.
         let event_handle = unsafe { OwnedHandle::from_raw_handle(event as RawHandle) };
 
         let timeout = match timeout {
@@ -39,6 +48,9 @@ impl WindowsAdapter {
 
         impl Drop for EventGuard {
             fn drop(&mut self) {
+                // SAFETY: FFI call to `SetEvent`. `self.0` is a live
+                // `OwnedHandle` to the event created above, so the handle is
+                // valid for the duration of this call.
                 unsafe { SetEvent(self.0.as_raw_handle()) };
             }
         }
@@ -48,6 +60,10 @@ impl WindowsAdapter {
         let driver = self.runtime.as_raw_fd() as usize;
         windows_threading::submit(move || {
             let handles = [event as RawHandle, driver as RawHandle];
+            // SAFETY: FFI call to `WaitForMultipleObjects`. `handles` is a
+            // live array of exactly 2 handles, matching the count argument,
+            // and both outlive the call: the event is kept alive by the
+            // `EventGuard` and the driver handle by the `Runtime`.
             let res = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, timeout) };
             let res = match res {
                 WAIT_FAILED => Err(io::Error::last_os_error()),

@@ -4,6 +4,8 @@
 //! to be used with different underlying event loop implementations, e.g.,
 //! `tokio` or `smol`.
 
+// Every `unsafe` block in this crate carries a `// SAFETY:` comment.
+#![deny(clippy::undocumented_unsafe_blocks)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![warn(missing_docs)]
 #![deny(rustdoc::broken_intra_doc_links)]

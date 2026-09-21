@@ -35,6 +35,10 @@ impl EventSource {
 
         let handle = io::stdin().as_raw_handle();
         let mut mode = 0;
+        // SAFETY: FFI call to `GetConsoleMode`. `handle` comes from a live
+        // `io::stdin()` and `mode` is a live `u32` the API writes into. A
+        // non-console handle makes the call fail rather than misbehave, and
+        // the failure is returned below.
         if unsafe { GetConsoleMode(handle, &mut mode) } == 0 {
             return Err(io::Error::last_os_error());
         }
@@ -87,8 +91,10 @@ impl ReadInput {
     }
 }
 
-// Compio waits for the console handle before calling `operate`. The operation
-// owns the record storage until it completes.
+// SAFETY: `OpCode` requires the operation be safe to poll according to the
+// `OpType` it returns. This one returns `OpType::Event(self.handle)`, so compio
+// waits for the console handle to signal before calling `operate`, and the
+// operation owns the `record` storage it writes into until it completes.
 unsafe impl OpCode for ReadInput {
     type Control = ();
 
@@ -102,6 +108,9 @@ unsafe impl OpCode for ReadInput {
         _: *mut windows_sys::Win32::System::IO::OVERLAPPED,
     ) -> Poll<io::Result<usize>> {
         let mut available = 0;
+        // SAFETY: FFI call to `GetNumberOfConsoleInputEvents`. `self.handle`
+        // is the console handle this op was constructed with and is valid for
+        // the op's lifetime; `available` is a live `u32` the API writes into.
         if unsafe { GetNumberOfConsoleInputEvents(self.handle, &mut available) } == 0 {
             return Poll::Ready(Err(io::Error::last_os_error()));
         }
@@ -113,6 +122,10 @@ unsafe impl OpCode for ReadInput {
         }
 
         let mut read = 0;
+        // SAFETY: FFI call to `ReadConsoleInputW`. `self.handle` is valid as
+        // above; `self.record` is a single live `INPUT_RECORD` owned by this
+        // op, matching the count of 1, so the API writes exactly one record
+        // in bounds; `read` is a live `u32`.
         if unsafe { ReadConsoleInputW(self.handle, &mut self.record, 1, &mut read) } == 0 {
             Poll::Ready(Err(io::Error::last_os_error()))
         } else if read == 1 {
