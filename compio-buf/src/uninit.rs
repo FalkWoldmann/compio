@@ -36,16 +36,34 @@ impl<T> Uninit<T> {
     }
 }
 
-impl<T: IoBuf> IoBuf for Uninit<T> {
+// SAFETY: forwards to the wrapped buffer, which meets these obligations.
+// The result is always empty, but is taken from the wrapped buffer so that
+// its pointer stays the one `as_uninit` is a prefix of.
+unsafe impl<T: IoBuf> IoBuf for Uninit<T> {
     fn as_init(&self) -> &[u8] {
         self.0.as_init() // this is always &[] but we can't return &[] since the pointer will be different
     }
 }
 
-impl<T: IoBufMut> IoBufMut for Uninit<T> {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+// SAFETY: views the wrapped buffer's spare capacity. The split point is the
+// wrapped buffer's own `buf_len()`, which is stable while borrowed, so the
+// view is stable; it contains no initialized bytes, so containment against
+// the empty `as_init` holds trivially.
+unsafe impl<T: IoBufMut> IoBufMut for Uninit<T> {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let len = (*self).buf_len();
-        &mut self.0.as_uninit()[len..]
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit` on the wrapped buffer.
+        // Contract: no byte below the wrapped buffer's `buf_len()` may be
+        // de-initialized.
+        // Evidence:
+        // - LOCAL FACT: only `[len..]` escapes, where `len` is that same
+        //   `buf_len()`. The initialized prefix is sliced off and never reaches
+        //   the caller, so no call through this view can reach a byte the
+        //   contract protects. `Uninit` discharges the obligation itself rather
+        //   than forwarding it.
+        let all = unsafe { self.0.as_uninit() };
+        &mut all[len..]
     }
 
     fn reserve(&mut self, len: usize) -> Result<(), ReserveError> {
@@ -57,8 +75,25 @@ impl<T: IoBufMut> IoBufMut for Uninit<T> {
     }
 }
 
-impl<T: SetLen + IoBuf> SetLen for Uninit<T> {
+// SAFETY: defers to the wrapped buffer's `set_len`, which moves the
+// boundary this view is defined against.
+unsafe impl<T: SetLen + IoBuf> SetLen for Uninit<T> {
     unsafe fn set_len(&mut self, len: usize) {
+        // SAFETY:
+        // Operation: `SetLen::set_len(len)` on the inner buffer.
+        // Contract: `len <= self.0.as_uninit().len()`, and the bytes in
+        // `[self.0.buf_len(), len)` are initialized.
+        // Evidence:
+        // - PRECONDITION: `SetLen::set_len` on the `Uninit` wrapper carries the
+        //   same two facts.
+        // - INVARIANT: `Uninit` wraps the buffer without reallocating or
+        //   copying it, so `len` names the same byte position in the inner
+        //   buffer as it does in the wrapper, and the caller's promise carries
+        //   over unchanged.
+        // - LOCAL FACT: `Uninit`'s own `as_uninit` returns the tail from
+        //   `buf_len()` onward, so it is shorter than the inner buffer's. That
+        //   makes the first obligation strictly easier for the callee than for
+        //   the caller, never harder.
         unsafe {
             self.0.set_len(len);
         }

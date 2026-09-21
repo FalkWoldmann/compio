@@ -93,7 +93,14 @@ impl AsyncRead for &[u8] {
     async fn read_vectored<T: IoVectoredBufMut>(&mut self, mut buf: T) -> BufResult<usize, T> {
         let mut this = *self; // An immutable slice to track the read position
 
-        for buf in buf.iter_uninit_slice() {
+        // SAFETY:
+        // Operation: `IoVectoredBufMut::iter_uninit_slice`.
+        // Contract: no byte below any buffer's `buf_len()` may be
+        // de-initialized.
+        // Evidence:
+        // - LOCAL FACT: `slice_to_uninit` only calls `write_copy_of_slice` from
+        //   an initialized `&[u8]`, so every byte it writes is initialized.
+        for buf in unsafe { buf.iter_uninit_slice() } {
             let n = slice_to_uninit(this, buf);
             this = &this[n..];
             if this.is_empty() {
@@ -171,7 +178,15 @@ macro_rules! impl_read_at {
                     let slice = &self[pos as usize..];
                     let mut this = slice;
 
-                    for buf in buf.iter_uninit_slice() {
+                    // SAFETY:
+                    // Operation: `IoVectoredBufMut::iter_uninit_slice`.
+                    // Contract: no byte below any buffer's `buf_len()` may be
+                    // de-initialized.
+                    // Evidence:
+                    // - LOCAL FACT: `slice_to_uninit` only calls
+                    //   `write_copy_of_slice` from an initialized `&[u8]`, so
+                    //   every byte it writes is initialized.
+                    for buf in unsafe { buf.iter_uninit_slice() } {
                         let n = slice_to_uninit(this, buf);
                         this = &this[n..];
                         if this.is_empty() {

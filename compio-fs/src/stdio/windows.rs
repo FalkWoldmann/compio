@@ -45,7 +45,10 @@ unsafe impl<R: Read, B: IoBufMut> OpCode for StdRead<R, B> {
     ) -> Poll<io::Result<usize>> {
         #[cfg(feature = "read_buf")]
         {
-            let slice = self.buffer.as_uninit();
+            // SAFETY: we hand the slice to `BorrowedBuf`, which only ever
+            // writes initialized bytes into it, so no byte below `buf_len()`
+            // is de-initialized.
+            let slice = unsafe { self.buffer.as_uninit() };
             let mut buf = io::BorrowedBuf::from(slice);
             let mut cursor = buf.unfilled();
             self.reader.read_buf(cursor.reborrow())?;

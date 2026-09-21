@@ -48,7 +48,16 @@ impl Buffer<Vec<u8>> {
             // Within the buffer, still has remaining data, move those to front
             let buf_len = buf.len();
             let remaining = buf_len - pos;
-            buf.copy_within(pos..buf_len, 0);
+            // SAFETY:
+            // Operation: `IoBufMutExt::copy_within(pos..buf_len, 0)`.
+            // Contract: either every byte of the source range is initialized,
+            // or the destination lies at or above `buf_len()`.
+            // Evidence:
+            // - LOCAL FACT: `buf_len` is `buf.len()`, the `Vec`'s initialized
+            //   length, and `pos < buf_len` was just checked, so `pos..buf_len`
+            //   is entirely within the initialized prefix. The first disjunct
+            //   holds.
+            unsafe { buf.copy_within(pos..buf_len, 0) };
 
             // SAFETY: We're setting the length to the amount of data we just
             // moved. The data from 0..remaining is initialized

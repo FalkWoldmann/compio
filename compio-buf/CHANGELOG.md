@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(buf)* `IoBufMutExt::fill_from_slice` and `IoBufMutExt::fill_bytes`: safe
+  ways to write initialized bytes over a buffer's whole extent and set its
+  length, so callers do not need `unsafe { as_uninit() }` for the common case
+  of filling a buffer.
+
+### Changed
+
+- **BREAKING** *(buf)* `IoBuf`, `IoBufMut`, `IoVectoredBuf`, `IoVectoredBufMut`
+  and `SetLen` are `unsafe trait`s again. Unsafe code passes the pointers and
+  lengths these return straight to the kernel, so an implementation whose
+  methods disagree with each other could cause undefined behaviour from
+  entirely safe calling code. `IoBuf` and `IoBufMut` carried the marker from
+  [#220](https://github.com/compio-rs/compio/issues/220) until
+  [#555](https://github.com/compio-rs/compio/pull/555) removed it in favour of
+  an `unsafe fn buffer` that was never added; this restores the guarantee and
+  extends it to the vectored traits, whose idempotency requirement was
+  previously only a note. Downstream implementors must write `unsafe impl` and
+  uphold the documented obligations. Code that only *uses* buffers is
+  unaffected.
+- **BREAKING** *(buf)* `IoBufMut::as_uninit`,
+  `IoVectoredBufMut::iter_uninit_slice` and `IoBufMutExt::copy_within` are now
+  `unsafe fn`. They expose the buffer's initialized prefix as `MaybeUninit`, so
+  safe code could de-initialize bytes that were promised to be initialized.
+  Callers must not de-initialize any byte below `buf_len()`.
+
 ### Fixed
 
 - *(buf)* `IoBufMut::as_mut_slice` built its slice from `buf_len()` and

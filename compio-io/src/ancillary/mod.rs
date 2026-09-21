@@ -115,9 +115,10 @@ impl<'a> Iterator for AncillaryIter<'a> {
 pub struct AncillaryBuilder<'a, B: ?Sized> {
     inner: sys::CMsgIter,
     /// The base address `inner`'s cursor is measured against, captured once in
-    /// `new`. Re-deriving it per `push` would offset the cursor from whatever
-    /// the latest `buf_mut_ptr()` call returned, which need not be the
-    /// allocation the cursor was computed in.
+    /// `new`. `IoBufMut`'s stability obligation now says a later call returns
+    /// the same pointer, but capturing it once means `push` does not depend on
+    /// that: re-deriving the base per message would write at an offset from
+    /// whatever the latest call returned.
     base: *mut u8,
     buffer: &'a mut B,
 }
@@ -155,9 +156,9 @@ impl<'a, B: IoBufMut + ?Sized> AncillaryBuilder<'a, B> {
         }
 
         // SAFETY: method `new` guarantees the buffer is zeroed and properly
-        // aligned, and we have checked the space.
-        // `self.base` is the same pointer `self.inner`'s cursor was computed
-        // against, so the offset lands inside the region it was measured in.
+        // aligned, and we have checked the space. `self.base` is the same
+        // pointer `self.inner`'s cursor was computed against, so the offset
+        // lands inside the allocation the cursor was measured in.
         let mut cmsg =
             unsafe { self.inner.current_mut(self.base.cast()) }.expect("sufficient space");
         cmsg.set_level(level);
@@ -166,7 +167,8 @@ impl<'a, B: IoBufMut + ?Sized> AncillaryBuilder<'a, B> {
             self.buffer.advance(cmsg.encode_data(value)?);
         }
 
-        // As above: advanced against the same base it was computed from.
+        // SAFETY: as above - the cursor is advanced against the same base it
+        // was computed from.
         unsafe { self.inner.next(self.base.cast()) };
 
         Ok(())
@@ -211,22 +213,24 @@ impl<const N: usize> Default for AncillaryBuf<N> {
     }
 }
 
-impl<const N: usize> IoBuf for AncillaryBuf<N> {
+unsafe impl<const N: usize> IoBuf for AncillaryBuf<N> {
     fn as_init(&self) -> &[u8] {
         &self.inner[..self.len]
     }
 }
 
-impl<const N: usize> SetLen for AncillaryBuf<N> {
+unsafe impl<const N: usize> SetLen for AncillaryBuf<N> {
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= N);
         self.len = len;
     }
 }
 
-impl<const N: usize> IoBufMut for AncillaryBuf<N> {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
-        self.inner.as_uninit()
+unsafe impl<const N: usize> IoBufMut for AncillaryBuf<N> {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+        // SAFETY: the wrapper exposes the inner array's bytes unchanged at the
+        // same indices, so this method's contract is the callee's verbatim.
+        unsafe { self.inner.as_uninit() }
     }
 }
 

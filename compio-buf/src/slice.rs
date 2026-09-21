@@ -89,7 +89,18 @@ impl<T: IoBuf> Slice<T> {
     /// Panics if `begin` is greater than the length of the underlying buffer.
     pub fn set_begin(&mut self, begin: usize) {
         assert!(begin <= self.buffer.buf_len());
-        // Safety: we just checked the invariant
+        // SAFETY:
+        // Operation: `Slice::set_begin_unchecked(begin)`.
+        // Contract: `begin` must be at most the length of the underlying
+        // buffer.
+        // Evidence:
+        // - LOCAL FACT: the `assert!` on the line above panics otherwise, and
+        //   nothing between it and this call mutates `self` or `begin`.
+        // - DEPENDENCY LEMMA: `IoBuf::buf_len` is defined as `as_init().len()`,
+        //   a safe method; see `docs/soundness.md` for what that dependency
+        //   does and does not buy. `Slice` stores the offset without forming a
+        //   pointer from it, so an over-large `begin` gives a wrong view here
+        //   rather than undefined behaviour.
         unsafe { self.set_begin_unchecked(begin) }
     }
 }
@@ -107,7 +118,17 @@ impl<T: IoBuf> Slice<Slice<T>> {
             (None, large_end) => large_end,
         };
 
-        // Safety: inner.begin + outer.begin <= buf_len
+        // SAFETY:
+        // Operation: `Slice::new(buffer, new_begin, new_end)`.
+        // Contract: `new_begin` must be at most the length of `buffer`.
+        // Evidence:
+        // - INVARIANT: every `Slice<U>` is built with `begin <= U::buf_len()`.
+        //   Applied to the outer slice, `self.begin <= self.buffer.buf_len()`,
+        //   where `self.buffer` is the inner `Slice<T>`.
+        // - LOCAL FACT: `Slice<T>`'s `buf_len` is `end_or_len() - begin`, and
+        //   `end_or_len()` is capped at `T::buf_len()`. So `self.begin <=
+        //   T::buf_len() - large_begin`, i.e. `large_begin + self.begin <=
+        //   T::buf_len()`, which is exactly `new_begin`.
         unsafe { Slice::new(self.buffer.buffer, new_begin, new_end) }
     }
 }
@@ -176,16 +197,34 @@ impl<T: IoBufMut> DerefMut for Slice<T> {
     }
 }
 
-impl<T: IoBuf> IoBuf for Slice<T> {
+// SAFETY: views a fixed sub-range of the wrapped buffer. `begin` and `end`
+// cannot change without `&mut self`, so the view is stable, and the wrapped
+// buffer supplies validity of the bytes inside it.
+unsafe impl<T: IoBuf> IoBuf for Slice<T> {
     fn as_init(&self) -> &[u8] {
         self.deref()
     }
 }
 
-impl<T: IoBufMut> IoBufMut for Slice<T> {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+// SAFETY: as for the `IoBuf` impl -- a fixed sub-range of a buffer that
+// already meets these obligations. The range starts at `begin` for both
+// `as_init` and `as_uninit`, so containment is preserved.
+unsafe impl<T: IoBufMut> IoBufMut for Slice<T> {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let range = self.range();
-        let bytes = self.buffer.as_uninit();
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit` on the underlying buffer.
+        // Contract: no byte below the underlying buffer's `buf_len()` may be
+        // de-initialized.
+        // Evidence:
+        // - LOCAL FACT: only `bytes[range]` escapes, and `range` starts at
+        //   `self.begin`, so the bytes the underlying buffer holds below
+        //   `begin` are never handed to the caller at all.
+        // - PRECONDITION: within the returned view, this method's own contract
+        //   forbids de-initializing below `Slice::buf_len()`, which is the
+        //   underlying buffer's initialized bytes from `begin` onwards. The two
+        //   regions are the same bytes under the shift by `begin`.
+        let bytes = unsafe { self.buffer.as_uninit() };
         &mut bytes[range]
     }
 
@@ -208,8 +247,28 @@ impl<T: IoBufMut> IoBufMut for Slice<T> {
     }
 }
 
-impl<T: SetLen> SetLen for Slice<T> {
+// SAFETY: shifts the length by the fixed `begin` offset and defers to the
+// wrapped buffer's `set_len`, so it moves the same boundary `as_init`
+// reports through this view.
+unsafe impl<T: SetLen> SetLen for Slice<T> {
     unsafe fn set_len(&mut self, len: usize) {
+        // SAFETY:
+        // Operation: `SetLen::set_len(self.begin + len)` on the underlying
+        // buffer.
+        // Contract: `self.begin + len <= buffer.as_uninit().len()`, and the
+        // bytes in `[buffer.buf_len(), self.begin + len)` are initialized.
+        // Evidence:
+        // - INVARIANT: `self.begin` is this slice's offset into the buffer, so
+        //   byte `len` of the slice is byte `self.begin + len` of the buffer;
+        //   the two obligations name the same bytes under that shift.
+        // - PRECONDITION: `SetLen::set_len` on this slice requires `len <=
+        //   self.as_uninit().len()` and `[self.buf_len(), len)` initialized.
+        //   `Slice`'s `as_uninit` is the buffer's `as_uninit` from `begin` to
+        //   `end_or_cap()`, so translating both by `begin` gives the callee's
+        //   obligations.
+        // - LOCAL FACT: no overflow check is made here; `begin` and `len` are
+        //   both bounded by the buffer's capacity, so their sum is bounded by
+        //   twice an allocation size and cannot wrap `usize`.
         unsafe { self.buffer.set_len(self.begin + len) }
     }
 }
@@ -286,7 +345,10 @@ impl<T> VectoredSlice<T> {
     }
 }
 
-impl<T: IoVectoredBuf> IoVectoredBuf for VectoredSlice<T> {
+// SAFETY: forwards to the wrapped buffer's implementation, which carries
+// the same obligations. This wrapper stores no pointer or length of its
+// own, so it cannot make successive calls disagree.
+unsafe impl<T: IoVectoredBuf> IoVectoredBuf for VectoredSlice<T> {
     fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
         let mut offset = self.offset;
         self.buf.iter_slice().skip(self.idx).map(move |buf| {
@@ -297,20 +359,53 @@ impl<T: IoVectoredBuf> IoVectoredBuf for VectoredSlice<T> {
     }
 }
 
-impl<T: SetLen> SetLen for VectoredSlice<T> {
+// SAFETY: shifts by the fixed `begin` offset and defers to the wrapped
+// vectored buffer's `set_len`.
+unsafe impl<T: SetLen> SetLen for VectoredSlice<T> {
     unsafe fn set_len(&mut self, len: usize) {
+        // SAFETY:
+        // Operation: `SetLen::set_len(self.begin + len)` on the underlying
+        // vectored buffer.
+        // Contract: `self.begin + len` is within that buffer's total capacity,
+        // and the bytes it adds are initialized.
+        // Evidence:
+        // - INVARIANT: `self.begin` is the number of bytes of the underlying
+        //   vectored buffer that this slice skips, so position `len` in the
+        //   slice is position `self.begin + len` in the buffer.
+        // - PRECONDITION: `SetLen::set_len` on this slice carries exactly those
+        //   facts for `len` in the slice's own coordinates; the shift by
+        //   `begin` restates them in the buffer's.
+        // - LOCAL FACT: both operands are bounded by the buffer's capacity, so
+        //   the sum cannot wrap `usize`.
         unsafe { self.buf.set_len(self.begin + len) }
     }
 }
 
-impl<T: IoVectoredBufMut> IoVectoredBufMut for VectoredSlice<T> {
-    fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
+// SAFETY: forwards to the wrapped buffer's implementation, which carries
+// the same obligations. This wrapper stores no pointer or length of its
+// own, so it cannot make successive calls disagree.
+unsafe impl<T: IoVectoredBufMut> IoVectoredBufMut for VectoredSlice<T> {
+    unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
         let mut offset = self.offset;
-        self.buf.iter_uninit_slice().skip(self.idx).map(move |buf| {
-            let ret = &mut buf[offset..];
-            offset = 0;
-            ret
-        })
+        // SAFETY:
+        // Operation: `IoVectoredBufMut::iter_uninit_slice` on the underlying
+        // vectored buffer.
+        // Contract: no byte below any buffer's `buf_len()` may be
+        // de-initialized.
+        // Evidence:
+        // - LOCAL FACT: the first `idx` slices are dropped by `skip` without
+        //   being written to, and each slice that does escape is narrowed to
+        //   `buf[offset..]`, so bytes before the slice's start are never
+        //   exposed.
+        // - PRECONDITION: this method carries the same per-slice contract for
+        //   everything it yields.
+        unsafe { self.buf.iter_uninit_slice() }
+            .skip(self.idx)
+            .map(move |buf| {
+                let ret = &mut buf[offset..];
+                offset = 0;
+                ret
+            })
     }
 }
 

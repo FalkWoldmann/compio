@@ -1,6 +1,6 @@
 use std::mem::MaybeUninit;
 
-use compio_buf::{BufResult, IoVectoredBufMut, SetLenExt};
+use compio_buf::{BufResult, IoBufMutExt, IoVectoredBufMut, SetLenExt};
 
 use crate::{AsyncBufRead, AsyncRead, IoResult};
 
@@ -31,26 +31,25 @@ impl AsyncRead for Repeat {
         &mut self,
         mut buf: B,
     ) -> compio_buf::BufResult<usize, B> {
-        let slice = buf.as_uninit();
-
-        let len = slice.len();
-        slice.fill(MaybeUninit::new(self.0));
-        // SAFETY: we just initialized exactly `len` bytes in `buf` from index
-        // 0, so the buffer's new length is `len`.
-        //
-        // `advance_to`, not `advance`: `advance` is the relative form and sets
-        // the length to `buf_len() + len`. The fill above starts at index 0,
-        // so for a buffer that already held bytes and still had spare capacity
-        // that ran the length past the allocation. `read_vectored` below
-        // already used the absolute form.
-        unsafe { buf.advance_to(len) };
+        // `fill_bytes` writes from index 0 and sets the length to match. The
+        // hand-written version used `advance(len)`, which sets the length to
+        // `buf_len() + len`: for a buffer that already had initialized bytes
+        // and spare capacity, that ran past the allocation.
+        let len = buf.fill_bytes(self.0);
 
         BufResult(Ok(len), buf)
     }
 
     async fn read_vectored<V: IoVectoredBufMut>(&mut self, mut buf: V) -> BufResult<usize, V> {
         let mut len: usize = 0;
-        for slice in buf.iter_uninit_slice() {
+        // SAFETY:
+        // Operation: `IoVectoredBufMut::iter_uninit_slice`.
+        // Contract: no byte below any buffer's `buf_len()` may be
+        // de-initialized.
+        // Evidence:
+        // - LOCAL FACT: the only write is `fill(MaybeUninit::new(self.0))`,
+        //   which stores an initialized `u8` in every element.
+        for slice in unsafe { buf.iter_uninit_slice() } {
             len = len
                 .checked_add(slice.len())
                 .expect("total vectored buffer length overflow");

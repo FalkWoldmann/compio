@@ -1,6 +1,6 @@
 use std::mem::MaybeUninit;
 
-use compio_buf::{IoBufMut, SetLenExt};
+use compio_buf::{IoBufMut, IoBufMutExt};
 
 #[inline]
 pub(crate) fn slice_to_uninit(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize {
@@ -12,10 +12,7 @@ pub(crate) fn slice_to_uninit(src: &[u8], dst: &mut [MaybeUninit<u8>]) -> usize 
 /// Copy the contents of a slice into a buffer implementing [`IoBufMut`].
 #[inline]
 pub(crate) fn slice_to_buf<B: IoBufMut + ?Sized>(src: &[u8], buf: &mut B) -> usize {
-    let len = slice_to_uninit(src, buf.as_uninit());
-    unsafe { buf.advance_to(len) };
-
-    len
+    buf.fill_from_slice(src)
 }
 
 pub(crate) const DEFAULT_BUF_SIZE: usize = 8 * 1024;
