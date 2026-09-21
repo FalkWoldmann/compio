@@ -649,10 +649,21 @@ impl<const N: usize> IoBufMut for [u8; N] {
 #[cfg(feature = "bytes")]
 impl IoBufMut for bytes::BytesMut {
     fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
-        let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
+        let len = self.len();
         let cap = self.capacity();
-        // SAFETY: BytesMut guarantees that the pointer is valid for `capacity`
-        // bytes
+
+        // `self.as_mut_ptr()` would go through `DerefMut` and only cover
+        // `len()` bytes. `spare_capacity_mut` at length zero covers the whole
+        // allocation.
+        // SAFETY: zero is within capacity and has no bytes to initialize.
+        unsafe { self.set_len(0) };
+        let ptr = self.spare_capacity_mut().as_mut_ptr();
+        // SAFETY: restores the length this buffer had on entry.
+        unsafe { self.set_len(len) };
+
+        // SAFETY: `ptr` is the start of the allocation, obtained with
+        // provenance for all `cap` bytes, and `&mut self` is borrowed for the
+        // returned lifetime.
         unsafe { std::slice::from_raw_parts_mut(ptr, cap) }
     }
 
