@@ -114,6 +114,11 @@ impl<'a> Iterator for AncillaryIter<'a> {
 /// Helper to construct ancillary (control) messages.
 pub struct AncillaryBuilder<'a, B: ?Sized> {
     inner: sys::CMsgIter,
+    /// The base address `inner`'s cursor is measured against, captured once in
+    /// `new`. Re-deriving it per `push` would offset the cursor from whatever
+    /// the latest `buf_mut_ptr()` call returned, which need not be the
+    /// allocation the cursor was computed in.
+    base: *mut u8,
     buffer: &'a mut B,
 }
 
@@ -129,8 +134,13 @@ impl<'a, B: IoBufMut + ?Sized> AncillaryBuilder<'a, B> {
         // SAFETY: always safe to make it empty.
         unsafe { buffer.set_len(0) };
         let slice = buffer.ensure_init();
-        let inner = sys::CMsgIter::new(slice.as_ptr(), slice.len());
-        Self { inner, buffer }
+        let base = slice.as_mut_ptr();
+        let inner = sys::CMsgIter::new(base, slice.len());
+        Self {
+            inner,
+            base,
+            buffer,
+        }
     }
 
     /// Append a control message into the buffer.
@@ -146,15 +156,18 @@ impl<'a, B: IoBufMut + ?Sized> AncillaryBuilder<'a, B> {
 
         // SAFETY: method `new` guarantees the buffer is zeroed and properly
         // aligned, and we have checked the space.
-        let mut cmsg = unsafe { self.inner.current_mut(self.buffer.buf_mut_ptr().cast()) }
-            .expect("sufficient space");
+        // `self.base` is the same pointer `self.inner`'s cursor was computed
+        // against, so the offset lands inside the region it was measured in.
+        let mut cmsg =
+            unsafe { self.inner.current_mut(self.base.cast()) }.expect("sufficient space");
         cmsg.set_level(level);
         cmsg.set_ty(ty);
         unsafe {
             self.buffer.advance(cmsg.encode_data(value)?);
         }
 
-        unsafe { self.inner.next(self.buffer.buf_mut_ptr().cast()) };
+        // As above: advanced against the same base it was computed from.
+        unsafe { self.inner.next(self.base.cast()) };
 
         Ok(())
     }
