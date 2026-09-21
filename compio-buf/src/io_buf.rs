@@ -394,7 +394,8 @@ pub trait IoBufMut: IoBuf + SetLen {
     /// [`Err(ReserveError::NotSupported)`]: ReserveError::NotSupported
     fn reserve(&mut self, len: usize) -> Result<(), ReserveError> {
         let init = (*self).buf_len();
-        if len <= self.buf_capacity() - init {
+        // Safe methods that need not agree: don't let the subtraction wrap.
+        if len <= self.buf_capacity().saturating_sub(init) {
             return Ok(());
         }
         Err(ReserveError::NotSupported)
@@ -447,12 +448,21 @@ pub trait IoBufMutExt: IoBufMut {
     /// [`IoBuf::as_init`], but mutable.
     fn as_mut_slice(&mut self) -> &mut [u8] {
         let len = (*self).buf_len();
-        let ptr = (*self).buf_mut_ptr();
+        let uninit = self.as_uninit();
+        // `as_init` and `as_uninit` are safe methods and need not agree, so
+        // clamp to what `as_uninit` returned. Loud in debug builds.
+        debug_assert!(
+            len <= uninit.len(),
+            "IoBuf::as_init reports {len} initialized bytes but IoBufMut::as_uninit exposes only \
+             {}; the two must describe the same buffer",
+            uninit.len(),
+        );
+        let n = len.min(uninit.len());
         // SAFETY:
-        // - lifetime of the returned slice is bounded by &mut self
-        // - bytes within `len` are guaranteed to be initialized
-        // - the pointer is derived from
-        unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, len) }
+        // - the lifetime of the returned slice is bounded by `&mut self`
+        // - `[0, n)` is within `as_uninit()`, and those bytes are the buffer's
+        //   initialized prefix
+        unsafe { uninit[..n].assume_init_mut() }
     }
 
     /// Extend the buffer by copying bytes from `src`.
@@ -462,25 +472,23 @@ pub trait IoBufMutExt: IoBufMut {
     ///
     /// Notice that this may move the memory of the buffer, so it's UB to
     /// call this after the buffer is being pinned.
-    // FIXME: Change to `slice::write_copy_of_slice` when stabilized
     fn extend_from_slice(&mut self, src: &[u8]) -> Result<(), ReserveError> {
         let len = src.len();
         let init = (*self).buf_len();
         self.reserve(len)?;
-        let ptr = self.buf_mut_ptr().wrapping_add(init);
 
-        unsafe {
-            // SAFETY:
-            // - we have reserved enough capacity so the ptr and len stays in
-            //   one allocation
-            // - src is valid for len bytes
-            // - ptr is valid for len bytes
-            // - &mut self guarantees that src cannot overlap with dst
-            std::ptr::copy_nonoverlapping(src.as_ptr() as _, ptr, len);
+        // Bound the write by the slice `as_uninit` returns, not by what
+        // `reserve` reported: both are safe methods and need not agree.
+        let dst = self
+            .as_uninit()
+            .get_mut(init..)
+            .and_then(|tail| tail.get_mut(..len))
+            .ok_or(ReserveError::NotSupported)?;
+        dst.write_copy_of_slice(src);
 
-            // SAFETY: the bytes in range [init, init + len) are initialized now
-            self.advance_to(init + len);
-        }
+        // SAFETY: `[init, init + len)` was just initialized, and it lies within
+        // `as_uninit()` because `dst` was taken from it.
+        unsafe { self.advance_to(init + len) };
 
         Ok(())
     }
