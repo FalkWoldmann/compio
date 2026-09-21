@@ -204,6 +204,67 @@ The other in-tree implementations were checked the same way and are fine:
 keeps its storage inside the struct, so `&mut self` already covers it. A
 spilled `SmallVec` is heap-backed and is now covered by the test too.
 
+## Bug 3 — `Repeat::read` advanced a buffer past its capacity
+
+Found by the call-site audit below, not by the trait work.
+
+```rust
+let slice = unsafe { buf.as_uninit() };
+let len = slice.len();            // the whole extent, i.e. buf_capacity()
+slice.fill(MaybeUninit::new(self.0));
+unsafe { buf.advance(len) };      // set_len(buf_len() + len)
+```
+
+The fill starts at index 0, so the buffer's new length is `len`. But
+`advance` is the *relative* form: it sets the length to `buf_len() + len`.
+For a buffer that already held bytes and still had spare capacity -- a
+partially filled read buffer, the ordinary case -- that runs the length past
+the allocation:
+
+```rust
+let mut v = Vec::with_capacity(13);
+v.extend_from_slice(b"abc");      // buf_len() 3, buf_capacity() 13
+compio_io::repeat(42).read(v).await;
+// unsafe precondition(s) violated: Vec::set_len requires new_len <= capacity()
+```
+
+No `unsafe` at the call site. `read_vectored`, three lines below, correctly
+used the absolute form `advance_vec_to`, which is what makes this a slip
+rather than a misunderstanding.
+
+**Fixed** by moving the operation into `IoBufMutExt::fill_bytes`, which owns
+the length arithmetic in one audited place, so no caller repeats the choice
+between `advance` and `advance_to`.
+
+## Audit: which `as_uninit` callers can stop using it
+
+Bug 1 made `as_uninit` an `unsafe fn`, which puts an obligation on every call
+site. The fewer call sites, the less proof there is to get wrong -- and three
+SAFETY comments on this branch have already named a false premise. The
+non-driver callers were audited to see how many could move to a safe API
+without breaking one again.
+
+| Site | Outcome |
+| --- | --- |
+| `compio-io/src/util/internal.rs` (`slice_to_buf`) | **Moved.** Now `buf.fill_from_slice(src)`; the function is entirely safe. |
+| `compio-io/src/util/repeat.rs` (`read`) | **Moved.** Now `buf.fill_bytes(self.0)` — and that is what fixed bug 3. |
+| `compio-io/src/ancillary/mod.rs` | **Stays.** Not a caller: it is `AncillaryBuf`'s own `as_uninit` implementation, forwarding to the inner array. |
+| `compio-fs/src/stdio/windows.rs` | **Stays.** `io::BorrowedBuf::from` takes `&mut [MaybeUninit<u8>]`; that is std's signature. |
+| `compio-quic/src/recv_stream.rs` (2 sites) | **Stays.** `RecvStream::poll_read_uninit` is compio-quic's own *public* API taking the slice. Changing it is a second API break, which this audit was scoped to avoid. |
+
+The two that moved did so because they write *only initialized bytes*. That is
+the whole criterion: de-initializing is the hazard, and a caller that never
+does it does not need the unsafe accessor -- it needs a safe primitive that
+writes initialized bytes over the whole extent. `IoBufMutExt::fill_from_slice`
+and `fill_bytes` are that primitive, added rather than swapped in, so nothing
+downstream breaks.
+
+This is the reachable part of "option 2" (splitting the API so initialized
+bytes never appear as `MaybeUninit`). The rest is not reachable: the driver
+hands the kernel one contiguous `(ptr, len)` over the whole extent, and that
+accessor cannot be made safe, only raw. Three of the five sites above are
+blocked by exactly that -- an external signature that wants the slice.
+
 ## Severity
 
 Neither is remotely triggerable; both require the local program to call the API.

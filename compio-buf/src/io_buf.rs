@@ -602,6 +602,74 @@ const _: [&dyn IoBufMut; 0] = [];
 
 /// Extension trait for mutable buffers.
 pub trait IoBufMutExt: IoBufMut {
+    /// Copy `src` into the buffer starting at index 0, overwriting whatever is
+    /// there, and grow the buffer's length to cover what was copied.
+    ///
+    /// Returns the number of bytes copied, which is
+    /// `min(src.len(), buf_capacity())`. As with
+    /// [`advance_to`](SetLenExt::advance_to), the length never shrinks.
+    ///
+    /// This is **safe** where [`IoBufMut::as_uninit`] is not: it writes only
+    /// initialized bytes, so it cannot de-initialize the prefix that
+    /// `as_uninit`'s contract protects. Prefer it over taking `as_uninit`
+    /// yourself -- it keeps the `unsafe` in one audited place rather than at
+    /// every call site.
+    fn fill_from_slice(&mut self, src: &[u8]) -> usize {
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit`.
+        // Contract: the caller must not de-initialize any byte below
+        // `buf_len()`.
+        // Evidence:
+        // - LOCAL FACT: the only write is `write_copy_of_slice` from a live
+        //   `&[u8]`, which stores initialized bytes. Nothing writes
+        //   `MaybeUninit::uninit()`.
+        let uninit = unsafe { self.as_uninit() };
+        let len = src.len().min(uninit.len());
+        uninit[..len].write_copy_of_slice(&src[..len]);
+
+        // SAFETY:
+        // Operation: `SetLenExt::advance_to(len)`.
+        // Contract: `len <= as_uninit().len()` and `[buf_len(), len)` must be
+        // initialized.
+        // Evidence:
+        // - LOCAL FACT: `len` was clamped to `uninit.len()` just above.
+        // - POSTCONDITION: the copy initialized exactly `[0, len)`, which
+        //   covers `[buf_len(), len)` for any `buf_len()`.
+        unsafe { self.advance_to(len) };
+        len
+    }
+
+    /// Fill the buffer's whole extent with `byte` and grow its length to the
+    /// capacity. Returns that length.
+    ///
+    /// Safe for the same reason as [`fill_from_slice`](Self::fill_from_slice):
+    /// every byte written is an initialized `u8`.
+    ///
+    /// Named `fill_bytes` rather than `fill` because `buf.fill(b)` on a
+    /// `Vec<u8>` would resolve through `Deref` to [`slice::fill`], which
+    /// covers only the initialized prefix -- a silently different operation.
+    fn fill_bytes(&mut self, byte: u8) -> usize {
+        // SAFETY:
+        // Operation: `IoBufMut::as_uninit`.
+        // Contract: the caller must not de-initialize any byte below
+        // `buf_len()`.
+        // Evidence:
+        // - LOCAL FACT: the only write is `fill(MaybeUninit::new(byte))`, which
+        //   stores an initialized `u8` in every element.
+        let uninit = unsafe { self.as_uninit() };
+        let len = uninit.len();
+        uninit.fill(MaybeUninit::new(byte));
+
+        // SAFETY:
+        // Operation: `SetLenExt::advance_to(len)`.
+        // Contract: as above.
+        // Evidence:
+        // - LOCAL FACT: `len` is `as_uninit().len()` exactly.
+        // - POSTCONDITION: the fill initialized every one of those bytes.
+        unsafe { self.advance_to(len) };
+        len
+    }
+
     /// Initialize all bytes in the buffer and return them.
     ///
     /// Bytes in the already-initialized prefix (`0..buf_len()`) are preserved.

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(buf)* `IoBufMutExt::fill_from_slice` and `IoBufMutExt::fill_bytes`: safe
+  ways to write initialized bytes over a buffer's whole extent and set its
+  length, so callers do not need `unsafe { as_uninit() }` for the common case
+  of filling a buffer. They write only initialized bytes, so they cannot
+  de-initialize the prefix.
+
 ### Fixed
 
 - *(buf)* `IoBufMut::as_uninit` for `bytes::BytesMut` built a `capacity()`-long

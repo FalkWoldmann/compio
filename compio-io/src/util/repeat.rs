@@ -1,6 +1,6 @@
 use std::mem::MaybeUninit;
 
-use compio_buf::{BufResult, IoVectoredBufMut, SetLenExt};
+use compio_buf::{BufResult, IoBufMutExt, IoVectoredBufMut, SetLenExt};
 
 use crate::{AsyncBufRead, AsyncRead, IoResult};
 
@@ -31,21 +31,11 @@ impl AsyncRead for Repeat {
         &mut self,
         mut buf: B,
     ) -> compio_buf::BufResult<usize, B> {
-        // SAFETY:
-        // Operation: `IoBufMut::as_uninit`.
-        // Contract: the caller must not de-initialize any byte below
-        // `buf_len()`.
-        // Evidence:
-        // - LOCAL FACT: the only write is `fill(MaybeUninit::new(self.0))`,
-        //   which stores an initialized `u8` in every element. The contract
-        //   permits writing initialized values anywhere in the slice.
-        let slice = unsafe { buf.as_uninit() };
-
-        let len = slice.len();
-        slice.fill(MaybeUninit::new(self.0));
-        // SAFETY: we just initialized exactly `len` bytes in `buf` from index
-        // 0.
-        unsafe { buf.advance(len) };
+        // `fill_bytes` writes from index 0 and sets the length to match. The
+        // hand-written version used `advance(len)`, which sets the length to
+        // `buf_len() + len`: for a buffer that already had initialized bytes
+        // and spare capacity, that ran past the allocation.
+        let len = buf.fill_bytes(self.0);
 
         BufResult(Ok(len), buf)
     }
@@ -102,4 +92,31 @@ impl AsyncBufRead for Repeat {
 /// ```
 pub fn repeat(byte: u8) -> Repeat {
     Repeat(byte)
+}
+
+#[cfg(test)]
+mod tests {
+    use compio_buf::IoBufExt;
+
+    use crate::AsyncRead;
+
+    /// `Repeat::read` used to call `advance(capacity)`, which sets the length
+    /// to `buf_len() + capacity`. Given a buffer that already held bytes and
+    /// still had spare capacity -- the ordinary shape of a partially filled
+    /// read buffer -- that ran the length past the allocation, tripping
+    /// `Vec::set_len requires that new_len <= capacity()`. Reachable with no
+    /// `unsafe` at the call site.
+    #[test]
+    fn read_does_not_advance_past_capacity() {
+        futures_executor::block_on(async {
+            let mut v: Vec<u8> = Vec::with_capacity(13);
+            v.extend_from_slice(b"abc");
+
+            let (n, out) = crate::repeat(42).read(v).await.unwrap();
+
+            assert_eq!(n, 13, "should report the whole extent");
+            assert_eq!(out.buf_len(), 13, "length must not exceed capacity");
+            assert!(out.iter().all(|&b| b == 42), "every byte overwritten");
+        })
+    }
 }
