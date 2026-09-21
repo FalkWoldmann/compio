@@ -31,6 +31,9 @@ mod compat;
 #[cfg(any(feature = "native-tls", feature = "py-dynamic-openssl"))]
 pub(crate) use compat::*;
 
+#[cfg(feature = "rustls-sansio")]
+pub mod sansio;
+
 #[cfg(feature = "rustls")]
 mod rtls;
 #[cfg(feature = "rustls")]

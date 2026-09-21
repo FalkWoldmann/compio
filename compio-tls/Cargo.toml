@@ -27,10 +27,16 @@ futures-rustls = { workspace = true, default-features = false, optional = true, 
     "tls12",
 ] }
 futures-util = { workspace = true, features = ["io"] }
+compio-buf = { workspace = true, optional = true }
+compio-io = { workspace = true, optional = true }
 pin-project-lite = { workspace = true, optional = true }
 
 [dev-dependencies]
 compio-runtime = { workspace = true }
+compio-net = { workspace = true }
+# The workspace pins compio-driver with default-features = false, which selects
+# the stub driver on Linux. Tests need a real one.
+compio-driver = { workspace = true, features = ["io-uring"] }
 compio-macros = { workspace = true }
 
 rand = "0.10.0"
@@ -49,6 +55,9 @@ futures-rustls = { workspace = true, default-features = false, features = [
 default = ["native-tls"]
 all = ["native-tls", "rustls"]
 rustls = ["dep:rustls", "dep:futures-rustls"]
+# Prototype: drive rustls as a sans-io state machine on compio's own IO
+# traits, with no futures::AsyncRead in between. See src/sansio.rs.
+rustls-sansio = ["rustls", "dep:compio-buf", "dep:compio-io"]
 native-tls = ["dep:native-tls", "dep:pin-project-lite"]
 native-tls-vendored = ["native-tls/vendored"]
 py-dynamic-openssl = ["dep:compio-py-dynamic-openssl", "dep:pin-project-lite"]
