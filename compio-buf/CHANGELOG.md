@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   past the allocation. `reserve` now saturates, and `extend_from_slice` bounds
   its write against the buffer's real uninit slice rather than trusting
   `reserve`.
+- *(buf)* `IoBufMut::as_uninit` for `bytes::BytesMut` built a `capacity()`-long
+  slice from a pointer obtained through `DerefMut`, which carries provenance
+  for only `len()` bytes. Miri reported undefined behaviour whenever the buffer
+  had spare capacity. The pointer now comes from `spare_capacity_mut`.
 
 
 ## 0.8.3 - 2026-06-14

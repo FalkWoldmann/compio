@@ -669,10 +669,41 @@ impl<const N: usize> IoBufMut for [u8; N] {
 #[cfg(feature = "bytes")]
 impl IoBufMut for bytes::BytesMut {
     fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
-        let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
+        let len = self.len();
         let cap = self.capacity();
-        // SAFETY: BytesMut guarantees that the pointer is valid for `capacity`
-        // bytes
+
+        // `BytesMut` has no inherent `as_mut_ptr`; the call resolves through
+        // `DerefMut`, which produces a `&mut [u8]` of length `len()`. The
+        // pointer it yields therefore carries provenance for only `len()`
+        // bytes, and building a `capacity()`-long slice from it is undefined
+        // behaviour. Miri rejects it whenever `cap > len`, which for a read
+        // buffer is always:
+        //
+        //     trying to retag from <...> for Unique permission at
+        //     alloc...[0x0], but that tag does not exist in the borrow stack
+        //
+        // `spare_capacity_mut` instead derives from `BytesMut`'s own owning
+        // pointer, so at length zero it hands back the whole allocation with
+        // the provenance to match. Shrinking to zero first is what makes the
+        // spare region cover `[0, cap)`.
+
+        // SAFETY: `BytesMut::set_len(0)` requires the new length to be within
+        // capacity and the bytes below it to be initialized. Zero is within
+        // any capacity and there are no bytes below it.
+        unsafe { self.set_len(0) };
+
+        let ptr = self.spare_capacity_mut().as_mut_ptr();
+
+        // SAFETY: `len` is the length this buffer had on entry, so it is
+        // within capacity and those bytes are still initialized -- nothing
+        // between the two calls writes to the buffer.
+        unsafe { self.set_len(len) };
+
+        // SAFETY: `ptr` came from `spare_capacity_mut` while the length was
+        // zero, so it is the start of the allocation and carries provenance
+        // for all `cap` of its bytes. `MaybeUninit<u8>` has the same size and
+        // alignment as `u8`, and `u8`'s alignment of 1 makes any non-null
+        // address aligned.
         unsafe { std::slice::from_raw_parts_mut(ptr, cap) }
     }
 
@@ -1165,5 +1196,35 @@ mod soundness_tests {
     #[test]
     fn reserve_refuses_when_the_impls_disagree() {
         assert!(Inconsistent::new().reserve(4).is_err());
+    }
+}
+
+#[cfg(all(test, feature = "bytes"))]
+mod bytesmut_provenance_tests {
+    use crate::*;
+
+    /// `BytesMut::as_uninit` used to build a `capacity()`-long slice from a
+    /// pointer obtained through `DerefMut`, which carries provenance for only
+    /// `len()` bytes. Undefined behaviour whenever the buffer has spare
+    /// capacity, which for a read buffer is always. Run under Miri to see the
+    /// original failure; this test exercises the paths that trip it.
+    #[test]
+    fn as_uninit_covers_the_whole_capacity() {
+        for (len, cap) in [(0, 8), (3, 16), (16, 16)] {
+            let mut b = bytes::BytesMut::with_capacity(cap);
+            b.extend_from_slice(&vec![1u8; len]);
+
+            let expected = b.capacity();
+            let uninit = b.as_uninit();
+            assert_eq!(
+                uninit.len(),
+                expected,
+                "as_uninit must span the whole extent"
+            );
+
+            // Touch every byte: this is what Miri rejected when the pointer
+            // only carried provenance for the initialized prefix.
+            uninit.fill(std::mem::MaybeUninit::new(0xAB));
+        }
     }
 }
