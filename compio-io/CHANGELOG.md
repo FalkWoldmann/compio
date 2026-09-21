@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(io)* `Repeat::read` called `advance(capacity)`, which sets the buffer's
+  length to `buf_len() + capacity` rather than to `capacity`. Reading into a
+  buffer that already held bytes and still had spare capacity pushed the
+  length past the allocation (`Vec::set_len requires new_len <= capacity()`),
+  reachable with no `unsafe` at the call site.
+
+
 ## 0.10.1 - 2026-06-14
 
 ### Added
