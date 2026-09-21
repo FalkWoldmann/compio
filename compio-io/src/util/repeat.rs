@@ -36,8 +36,14 @@ impl AsyncRead for Repeat {
         let len = slice.len();
         slice.fill(MaybeUninit::new(self.0));
         // SAFETY: we just initialized exactly `len` bytes in `buf` from index
-        // 0.
-        unsafe { buf.advance(len) };
+        // 0, so the buffer's new length is `len`.
+        //
+        // `advance_to`, not `advance`: `advance` is the relative form and sets
+        // the length to `buf_len() + len`. The fill above starts at index 0,
+        // so for a buffer that already held bytes and still had spare capacity
+        // that ran the length past the allocation. `read_vectored` below
+        // already used the absolute form.
+        unsafe { buf.advance_to(len) };
 
         BufResult(Ok(len), buf)
     }
@@ -87,4 +93,31 @@ impl AsyncBufRead for Repeat {
 /// ```
 pub fn repeat(byte: u8) -> Repeat {
     Repeat(byte)
+}
+
+#[cfg(test)]
+mod tests {
+    use compio_buf::IoBufExt;
+
+    use crate::AsyncRead;
+
+    /// `Repeat::read` used to call `advance(capacity)`, which sets the length
+    /// to `buf_len() + capacity`. Given a buffer that already held bytes and
+    /// still had spare capacity -- the ordinary shape of a partially filled
+    /// read buffer -- that ran the length past the allocation, tripping
+    /// `Vec::set_len requires that new_len <= capacity()`. Reachable with no
+    /// `unsafe` at the call site.
+    #[test]
+    fn read_does_not_advance_past_capacity() {
+        futures_executor::block_on(async {
+            let mut v: Vec<u8> = Vec::with_capacity(13);
+            v.extend_from_slice(b"abc");
+
+            let (n, out) = crate::repeat(42).read(v).await.unwrap();
+
+            assert_eq!(n, 13, "should report the whole extent");
+            assert_eq!(out.buf_len(), 13, "length must not exceed capacity");
+            assert!(out.iter().all(|&b| b == 42), "every byte overwritten");
+        })
+    }
 }
