@@ -61,7 +61,7 @@ fn test_cmsg_data_len() {
     struct DataLen(usize);
 
     impl AncillaryData for DataLen {
-        fn encode(&self, _: &mut [MaybeUninit<u8>]) -> Result<(), CodecError> {
+        fn encode(&self, _: &mut [u8]) -> Result<(), CodecError> {
             unreachable!()
         }
 

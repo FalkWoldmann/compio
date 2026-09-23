@@ -36,7 +36,7 @@ use std::{
     ptr,
 };
 
-use compio_buf::{IoBuf, IoBufMut, IoBufMutExt, SetLen, SetLenExt};
+use compio_buf::{IoBuf, IoBufMut, IoBufMutExt, SetLen};
 
 mod io;
 
@@ -76,8 +76,7 @@ impl AncillaryRef<'_> {
 
 /// An iterator for ancillary (control) messages.
 pub struct AncillaryIter<'a> {
-    inner: sys::CMsgIter,
-    buffer: &'a [u8],
+    inner: sys::CMsgIter<'a>,
 }
 
 impl<'a> AncillaryIter<'a> {
@@ -93,8 +92,7 @@ impl<'a> AncillaryIter<'a> {
     /// The buffer should contain valid control messages.
     pub unsafe fn new(buffer: &'a [u8]) -> Self {
         Self {
-            inner: sys::CMsgIter::new(buffer.as_ptr(), buffer.len()),
-            buffer,
+            inner: sys::CMsgIter::new(buffer),
         }
     }
 }
@@ -103,17 +101,13 @@ impl<'a> Iterator for AncillaryIter<'a> {
     type Item = AncillaryRef<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        unsafe {
-            let cmsg = self.inner.current(self.buffer.as_ptr());
-            self.inner.next(self.buffer.as_ptr());
-            cmsg.map(AncillaryRef)
-        }
+        self.inner.next().map(AncillaryRef)
     }
 }
 
 /// Helper to construct ancillary (control) messages.
 pub struct AncillaryBuilder<'a, B: ?Sized> {
-    inner: sys::CMsgIter,
+    offset: Option<usize>,
     buffer: &'a mut B,
 }
 
@@ -129,8 +123,9 @@ impl<'a, B: IoBufMut + ?Sized> AncillaryBuilder<'a, B> {
         // SAFETY: always safe to make it empty.
         unsafe { buffer.set_len(0) };
         let slice = buffer.ensure_init();
-        let inner = sys::CMsgIter::new(slice.as_ptr(), slice.len());
-        Self { inner, buffer }
+        sys::check_buffer(slice);
+        let offset = sys::first(slice);
+        Self { offset, buffer }
     }
 
     /// Append a control message into the buffer.
@@ -140,22 +135,13 @@ impl<'a, B: IoBufMut + ?Sized> AncillaryBuilder<'a, B> {
         ty: i32,
         value: &T,
     ) -> Result<(), CodecError> {
-        if !self.inner.is_space_enough(T::SIZE) {
-            return Err(CodecError::BufferTooSmall);
-        }
-
-        // SAFETY: method `new` guarantees the buffer is zeroed and properly
-        // aligned, and we have checked the space.
-        let mut cmsg = unsafe { self.inner.current_mut(self.buffer.buf_mut_ptr().cast()) }
-            .expect("sufficient space");
-        cmsg.set_level(level);
-        cmsg.set_ty(ty);
-        unsafe {
-            self.buffer.advance(cmsg.encode_data(value)?);
-        }
-
-        unsafe { self.inner.next(self.buffer.buf_mut_ptr().cast()) };
-
+        let offset = self.offset.ok_or(CodecError::BufferTooSmall)?;
+        let buf = self.buffer.ensure_init();
+        let end = sys::write_message(buf, offset, level, ty, value)?;
+        self.offset = sys::after(buf, end);
+        // SAFETY: `ensure_init` initialized the whole buffer, and
+        // `write_message` checked `end <= buf.len()`.
+        unsafe { self.buffer.set_len(end) };
         Ok(())
     }
 }
@@ -327,8 +313,6 @@ impl std::error::Error for CodecError {
 /// # Example
 ///
 /// ```
-/// use std::mem::MaybeUninit;
-///
 /// use compio_io::ancillary::{AncillaryData, CodecError};
 ///
 /// struct MyData {
@@ -338,14 +322,11 @@ impl std::error::Error for CodecError {
 /// impl AncillaryData for MyData {
 ///     const SIZE: usize = std::mem::size_of::<u32>();
 ///
-///     fn encode(&self, buffer: &mut [MaybeUninit<u8>]) -> Result<(), CodecError> {
+///     fn encode(&self, buffer: &mut [u8]) -> Result<(), CodecError> {
 ///         if buffer.len() < Self::SIZE {
 ///             return Err(CodecError::BufferTooSmall);
 ///         }
-///         let bytes = self.value.to_ne_bytes();
-///         for (i, &byte) in bytes.iter().enumerate() {
-///             buffer[i] = MaybeUninit::new(byte);
-///         }
+///         buffer[..4].copy_from_slice(&self.value.to_ne_bytes());
 ///         Ok(())
 ///     }
 ///
@@ -375,7 +356,7 @@ pub trait AncillaryData: Sized {
     /// Returns [`CodecError::BufferTooSmall`] if the buffer is too small to
     /// hold the encoded data, or [`CodecError::Other`] for other encoding
     /// errors.
-    fn encode(&self, buffer: &mut [MaybeUninit<u8>]) -> Result<(), CodecError>;
+    fn encode(&self, buffer: &mut [u8]) -> Result<(), CodecError>;
 
     /// Decode a value from the provided buffer.
     ///
@@ -386,10 +367,7 @@ pub trait AncillaryData: Sized {
     fn decode(buffer: &[u8]) -> Result<Self, CodecError>;
 }
 
-unsafe fn copy_to_bytes<T: AncillaryData>(
-    src: &T,
-    dest: &mut [MaybeUninit<u8>],
-) -> Result<(), CodecError> {
+unsafe fn copy_to_bytes<T: AncillaryData>(src: &T, dest: &mut [u8]) -> Result<(), CodecError> {
     if dest.len() < T::SIZE {
         return Err(CodecError::BufferTooSmall);
     }

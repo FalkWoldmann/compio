@@ -1,7 +1,7 @@
-use std::{mem::MaybeUninit, slice};
+use std::mem::{offset_of, size_of};
 
 #[cfg(unix)]
-use libc::{CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN, CMSG_NXTHDR, msghdr};
+use libc::CMSG_LEN;
 #[cfg(unix)]
 pub use libc::{CMSG_SPACE, cmsghdr};
 #[cfg(windows)]
@@ -12,7 +12,7 @@ use windows_sys::Win32::Networking::WinSock::{self, IN_PKTINFO, IN6_PKTINFO};
 use super::{AncillaryData, CodecError, copy_from_bytes, copy_to_bytes};
 
 #[cfg(windows)]
-#[allow(non_snake_case)]
+#[allow(non_snake_case, dead_code)]
 mod windows_macros {
     use std::ptr::null_mut;
 
@@ -75,34 +75,110 @@ mod windows_macros {
 }
 
 #[cfg(windows)]
-pub use windows_macros::CMSG_SPACE;
+use windows_macros::CMSG_LEN;
 #[cfg(windows)]
-use windows_macros::{CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN, CMSG_NXTHDR, msghdr_from_raw};
+pub use windows_macros::CMSG_SPACE;
 
-#[cfg(unix)]
-fn msghdr_from_raw(ptr: *const u8, len: usize) -> msghdr {
-    let mut msg: msghdr = unsafe { std::mem::zeroed() };
-    msg.msg_control = ptr as _;
-    msg.msg_controllen = len as _;
-    msg
+const HDR: usize = size_of::<cmsghdr>();
+
+/// `CMSG_SPACE(len)`: header plus `len` payload bytes, padded for alignment.
+pub(crate) fn cmsg_space(len: usize) -> usize {
+    // SAFETY: `CMSG_SPACE` only does integer arithmetic on its argument.
+    #[allow(clippy::unnecessary_cast)]
+    unsafe {
+        CMSG_SPACE(len as _) as usize
+    }
+}
+
+/// `CMSG_LEN(len)`: the `cmsg_len` of a message with `len` payload bytes.
+fn cmsg_len(len: usize) -> usize {
+    // SAFETY: `CMSG_LEN` only does integer arithmetic on its argument.
+    #[allow(clippy::unnecessary_cast)]
+    unsafe {
+        CMSG_LEN(len as _) as usize
+    }
+}
+
+/// `CMSG_ALIGN(len)`: `len` rounded up to the platform's control message
+/// alignment, derived from `CMSG_SPACE` so it matches the platform. `None` on
+/// overflow.
+fn cmsg_align(len: usize) -> Option<usize> {
+    let unit = cmsg_space(1) - cmsg_space(0);
+    len.checked_next_multiple_of(unit)
+}
+
+/// Offset and size of a `cmsghdr` field. The size comes from the field's type,
+/// which differs between platforms (`cmsg_len` is `usize` on glibc and Windows,
+/// `u32` on musl and the BSDs).
+macro_rules! field {
+    ($f:ident) => {{
+        fn size<F>(_: fn(&cmsghdr) -> &F) -> usize {
+            size_of::<F>()
+        }
+        (offset_of!(cmsghdr, $f), size(|h| &h.$f))
+    }};
+}
+
+fn get(header: &[u8], (offset, size): (usize, usize)) -> u64 {
+    let bytes = &header[offset..offset + size];
+    match size {
+        4 => u32::from_ne_bytes(bytes.try_into().unwrap()).into(),
+        8 => u64::from_ne_bytes(bytes.try_into().unwrap()),
+        _ => unreachable!("unexpected cmsghdr field size"),
+    }
+}
+
+fn set(header: &mut [u8], (offset, size): (usize, usize), value: u64) {
+    let bytes = &mut header[offset..offset + size];
+    match size {
+        4 => bytes.copy_from_slice(&u32::try_from(value).expect("value too large").to_ne_bytes()),
+        8 => bytes.copy_from_slice(&value.to_ne_bytes()),
+        _ => unreachable!("unexpected cmsghdr field size"),
+    }
+}
+
+/// Checks the preconditions both the iterator and the builder rely on.
+pub(crate) fn check_buffer(buf: &[u8]) {
+    assert!(buf.len() >= cmsg_space(0), "buffer too short");
+    assert!(
+        buf.as_ptr().cast::<cmsghdr>().is_aligned(),
+        "misaligned buffer"
+    );
+}
+
+/// Offset of the first header, like `CMSG_FIRSTHDR`.
+pub(crate) fn first(buf: &[u8]) -> Option<usize> {
+    (buf.len() >= HDR).then_some(0)
+}
+
+/// Offset of the header after the one at `offset`, following the `libc`
+/// crate's Linux `CMSG_NXTHDR`: `None` if the current `cmsg_len` is shorter
+/// than a header, or if a whole header does not fit after it.
+fn next(buf: &[u8], offset: usize) -> Option<usize> {
+    let len = get(&buf[offset..offset + HDR], field!(cmsg_len));
+    let len = usize::try_from(len).ok().filter(|&len| len >= HDR)?;
+    let next = offset.checked_add(cmsg_align(len)?)?;
+    (next.checked_add(HDR)? <= buf.len()).then_some(next)
 }
 
 pub(crate) struct CMsgRef<'a> {
-    header: &'a cmsghdr,
+    level: i32,
+    ty: i32,
+    len: usize,
     data: &'a [u8],
 }
 
 impl CMsgRef<'_> {
     pub(crate) fn level(&self) -> i32 {
-        self.header.cmsg_level as _
+        self.level
     }
 
     pub(crate) fn ty(&self) -> i32 {
-        self.header.cmsg_type as _
+        self.ty
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.header.cmsg_len as _
+        self.len
     }
 
     pub(crate) fn decode_data<T: AncillaryData>(&self) -> Result<T, CodecError> {
@@ -110,95 +186,72 @@ impl CMsgRef<'_> {
     }
 }
 
-pub(crate) struct CMsgMut<'a>(&'a mut cmsghdr);
-
-impl CMsgMut<'_> {
-    pub(crate) fn set_level(&mut self, level: i32) {
-        self.0.cmsg_level = level as _;
-    }
-
-    pub(crate) fn set_ty(&mut self, ty: i32) {
-        self.0.cmsg_type = ty as _;
-    }
-
-    pub(crate) fn encode_data<T: AncillaryData>(&mut self, value: &T) -> Result<usize, CodecError> {
-        self.0.cmsg_len = unsafe { CMSG_LEN(T::SIZE as _) } as _;
-        let data_ptr = unsafe { CMSG_DATA(self.0) } as *mut MaybeUninit<u8>;
-        let buffer = unsafe { slice::from_raw_parts_mut(data_ptr, T::SIZE) };
-        value.encode(buffer)?;
-        Ok(unsafe { CMSG_SPACE(T::SIZE as _) } as _)
-    }
-}
-
-pub(crate) struct CMsgIter {
-    len: usize,
+pub(crate) struct CMsgIter<'a> {
+    buf: &'a [u8],
     offset: Option<usize>,
 }
 
-impl CMsgIter {
-    pub(crate) fn new(ptr: *const u8, len: usize) -> Self {
-        assert!(len >= unsafe { CMSG_SPACE(0) as _ }, "buffer too short");
-        assert!(ptr.cast::<cmsghdr>().is_aligned(), "misaligned buffer");
-
-        let msg = msghdr_from_raw(ptr.cast_mut(), len);
-        let first_cmsg = unsafe { CMSG_FIRSTHDR(&msg) };
-
-        let offset = if first_cmsg.is_null() {
-            None
-        } else {
-            Some(first_cmsg.addr() - ptr.addr())
-        };
-        Self { len, offset }
+impl<'a> CMsgIter<'a> {
+    pub(crate) fn new(buf: &'a [u8]) -> Self {
+        check_buffer(buf);
+        Self {
+            buf,
+            offset: first(buf),
+        }
     }
+}
 
-    pub(crate) unsafe fn current<'a>(&self, ptr: *const u8) -> Option<CMsgRef<'a>> {
+impl<'a> Iterator for CMsgIter<'a> {
+    type Item = CMsgRef<'a>;
+
+    fn next(&mut self) -> Option<CMsgRef<'a>> {
+        let buf = self.buf;
         let offset = self.offset?;
-        let header_ptr = unsafe { ptr.add(offset) }.cast::<cmsghdr>();
-        let header = unsafe { &*header_ptr };
-        // `cmsg_len` counts the header, so the payload is shorter by the offset
-        // of `CMSG_DATA`. Also clamp it to the end of the buffer.
-        let data_ptr = unsafe { CMSG_DATA(header_ptr) } as *const u8;
-        let data_offset = data_ptr.addr() - ptr.addr();
-        let cmsg_len: usize = header.cmsg_len as _;
-        let data_len = cmsg_len
-            .saturating_sub(data_offset - offset)
-            .min(self.len.saturating_sub(data_offset));
-        let data = unsafe { slice::from_raw_parts(data_ptr, data_len) };
-        Some(CMsgRef { header, data })
+        let header = &buf[offset..offset + HDR];
+        let len = get(header, field!(cmsg_len)) as usize;
+        // The payload starts after the aligned header and ends at `cmsg_len`,
+        // clamped to the buffer.
+        let data_start = (offset + cmsg_len(0)).min(buf.len());
+        let data_end = offset.saturating_add(len).clamp(data_start, buf.len());
+        self.offset = next(buf, offset);
+        Some(CMsgRef {
+            level: get(header, field!(cmsg_level)) as u32 as i32,
+            ty: get(header, field!(cmsg_type)) as u32 as i32,
+            len,
+            data: &buf[data_start..data_end],
+        })
     }
+}
 
-    pub(crate) unsafe fn next(&mut self, ptr: *const u8) {
-        if let Some(offset) = self.offset {
-            let msg = msghdr_from_raw(ptr, self.len);
-            let next_cmsg = unsafe { CMSG_NXTHDR(&msg, ptr.add(offset).cast()) };
-            if next_cmsg.is_null() {
-                self.offset = None;
-            } else {
-                self.offset = Some(next_cmsg.addr() - ptr.addr());
-            }
-        }
-    }
+/// Writes one message at `offset` and returns the offset just past it.
+pub(crate) fn write_message<T: AncillaryData>(
+    buf: &mut [u8],
+    offset: usize,
+    level: i32,
+    ty: i32,
+    value: &T,
+) -> Result<usize, CodecError> {
+    let end = offset
+        .checked_add(cmsg_space(T::SIZE))
+        .filter(|&end| end <= buf.len())
+        .ok_or(CodecError::BufferTooSmall)?;
+    let header = &mut buf[offset..offset + HDR];
+    set(header, field!(cmsg_len), cmsg_len(T::SIZE) as u64);
+    set(header, field!(cmsg_level), level as u32 as u64);
+    set(header, field!(cmsg_type), ty as u32 as u64);
+    let data_start = offset + cmsg_len(0);
+    value.encode(&mut buf[data_start..data_start + T::SIZE])?;
+    Ok(end)
+}
 
-    pub(crate) unsafe fn current_mut<'a>(&self, ptr: *mut u8) -> Option<CMsgMut<'a>> {
-        self.offset
-            .and_then(|offset| unsafe { ptr.add(offset).cast::<cmsghdr>().as_mut() })
-            .map(CMsgMut)
-    }
-
-    pub(crate) fn is_space_enough(&self, space: usize) -> bool {
-        if let Some(offset) = self.offset {
-            #[allow(clippy::unnecessary_cast)]
-            let space = unsafe { CMSG_SPACE(space as _) } as usize;
-            offset + space <= self.len
-        } else {
-            false
-        }
-    }
+/// Offset for the next message after one ending at `end`, if a header fits.
+pub(crate) fn after(buf: &[u8], end: usize) -> Option<usize> {
+    (end.checked_add(HDR)? <= buf.len()).then_some(end)
 }
 
 #[cfg(unix)]
 impl AncillaryData for libc::in_addr {
-    fn encode(&self, buffer: &mut [MaybeUninit<u8>]) -> Result<(), CodecError> {
+    fn encode(&self, buffer: &mut [u8]) -> Result<(), CodecError> {
         unsafe { copy_to_bytes(self, buffer) }
     }
 
@@ -209,7 +262,7 @@ impl AncillaryData for libc::in_addr {
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 impl AncillaryData for libc::in_pktinfo {
-    fn encode(&self, buffer: &mut [MaybeUninit<u8>]) -> Result<(), CodecError> {
+    fn encode(&self, buffer: &mut [u8]) -> Result<(), CodecError> {
         let mut pktinfo: libc::in_pktinfo = unsafe { std::mem::zeroed() };
         pktinfo.ipi_ifindex = self.ipi_ifindex;
         pktinfo.ipi_spec_dst.s_addr = self.ipi_spec_dst.s_addr;
@@ -233,7 +286,7 @@ impl AncillaryData for libc::in_pktinfo {
 
 #[cfg(unix)]
 impl AncillaryData for libc::in6_pktinfo {
-    fn encode(&self, buffer: &mut [MaybeUninit<u8>]) -> Result<(), CodecError> {
+    fn encode(&self, buffer: &mut [u8]) -> Result<(), CodecError> {
         let mut pktinfo: libc::in6_pktinfo = unsafe { std::mem::zeroed() };
         pktinfo.ipi6_ifindex = self.ipi6_ifindex;
         pktinfo.ipi6_addr.s6_addr = self.ipi6_addr.s6_addr;
@@ -253,7 +306,7 @@ impl AncillaryData for libc::in6_pktinfo {
 
 #[cfg(windows)]
 impl AncillaryData for IN_PKTINFO {
-    fn encode(&self, buffer: &mut [MaybeUninit<u8>]) -> Result<(), CodecError> {
+    fn encode(&self, buffer: &mut [u8]) -> Result<(), CodecError> {
         let mut pktinfo: IN_PKTINFO = unsafe { std::mem::zeroed() };
         unsafe {
             pktinfo.ipi_addr.S_un.S_addr = self.ipi_addr.S_un.S_addr;
@@ -277,7 +330,7 @@ impl AncillaryData for IN_PKTINFO {
 
 #[cfg(windows)]
 impl AncillaryData for IN6_PKTINFO {
-    fn encode(&self, buffer: &mut [MaybeUninit<u8>]) -> Result<(), CodecError> {
+    fn encode(&self, buffer: &mut [u8]) -> Result<(), CodecError> {
         let mut pktinfo: IN6_PKTINFO = unsafe { std::mem::zeroed() };
         unsafe {
             pktinfo.ipi6_addr.u.Byte = self.ipi6_addr.u.Byte;
