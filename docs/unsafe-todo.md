@@ -72,6 +72,34 @@ N1 has not been caught before because `u32::decode` reads only the first 4 bytes
 so decoded values are correct. The overread only matters when a message ends
 within 16 bytes of the end of its allocation.
 
+## Upstream issue #1053
+
+[compio-rs/compio#1053](https://github.com/compio-rs/compio/issues/1053),
+*Safe code can de-initialize a buffer through as_uninit* (opened 2026-09-20,
+open, no comments), covers only **B1**. It gives the `[u8; N]` reproducer and
+proposes making `as_uninit` an `unsafe fn`, which is the fix
+`claude/compio-unsafe-code-e3j5pw` implements. Every other finding here is
+unreported upstream.
+
+| Finding | In #1053? | Gap |
+| --- | --- | --- |
+| B1, `as_uninit` on `[u8; N]` | Yes | None: this is the issue's reproducer |
+| B1 on `Vec<u8>`, `&mut [u8]`, `BytesMut`, `ArrayVec`, `SmallVec`, `MmapMut` | Partly | The issue shows only the array. The same UB was confirmed for `Vec<u8>` and `&mut [u8]` |
+| B1 siblings `iter_uninit_slice`, `copy_within` | No | Same UB by another route. The fix has to cover them too |
+| 2a to 2d | No | Shares the root cause the issue cites (#220's `unsafe trait` removed by #555). Making `as_uninit` an `unsafe fn` alone does not fix these; restoring the `unsafe trait` markers does |
+| 2e, `BytesMut::as_uninit` provenance | No | Separate bug, reachable through ordinary use |
+| B3, `Repeat::read` | No | Separate bug in `compio-io` |
+| N1, N2a, N2b | No | New. Present on master |
+| N3 to N6, G1 to G3, D1 | No | Hardening, build fix and review debt; they don't need issues of their own |
+
+Suggested upstream follow-ups:
+
+- Comment on #1053: add the sibling methods, the other affected impls, and the
+  point that the `unsafe trait` markers need restoring too (2a to 2d).
+- Open a new issue for N1 and N2 (ancillary UB in `compio-io`), using the Miri
+  test above.
+- Open a new issue for B3 and 2e, or reference them in the PRs that fix them.
+
 ## Fix order
 
 The order is: UB reachable from safe code first, then anything that would make
@@ -100,7 +128,7 @@ hardening, then review debt.
 3. **Land the buffer-trait work (B1, 2a to 2e, B3)** from
    `claude/compio-unsafe-code-e3j5pw`, or through the split `fix/*` PRs. It is
    breaking: `unsafe trait IoBuf`/`IoBufMut`/`SetLen`/…, and `unsafe fn
-   as_uninit`. Do step 2 first. The small `fix/*` branches
+   as_uninit`. Do step 2 first. This closes upstream #1053. The small `fix/*` branches
    (`buffer-pointer-stability`, `buffer-bounds-hardening`,
    `bytesmut-as-uninit-provenance`, `repeat-advance-past-capacity`) are not
    breaking and can go ahead of `fix/buffer-trait-soundness`.
