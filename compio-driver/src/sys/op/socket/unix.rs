@@ -1,6 +1,6 @@
 use std::{net::Shutdown, num::NonZeroU32};
 
-use compio_buf::{IoBufExt, IoBufMutExt};
+use compio_buf::IoBufMutExt;
 use rustix::{
     io::close,
     net::{
@@ -427,8 +427,10 @@ impl<T: IoVectoredBuf, C: IoBuf, S> SendMsg<T, C, S> {
         }
         ctrl.msg.msg_iov = ctrl.slices.as_ptr() as _;
         ctrl.msg.msg_iovlen = ctrl.slices.len() as _;
-        ctrl.msg.msg_control = self.control.buf_ptr() as _;
-        ctrl.msg.msg_controllen = self.control.buf_len() as _;
+        // One call, so the pointer and the length describe the same region.
+        let control = self.control.as_init();
+        ctrl.msg.msg_control = control.as_ptr() as _;
+        ctrl.msg.msg_controllen = control.len() as _;
     }
 }
 
@@ -455,8 +457,10 @@ impl<T: IoVectoredBufMut, C: IoBufMut, S> RecvMsg<T, C, S> {
         ctrl.msg.msg_namelen = self.header.addr.size_of() as _;
         ctrl.msg.msg_iov = ctrl.slices.as_mut_ptr() as _;
         ctrl.msg.msg_iovlen = ctrl.slices.len() as _;
-        ctrl.msg.msg_control = self.control.buf_mut_ptr() as _;
-        ctrl.msg.msg_controllen = self.control.buf_capacity() as _;
+        // One call, so the pointer and the length describe the same region.
+        let control = self.control.as_uninit();
+        ctrl.msg.msg_control = control.as_mut_ptr() as _;
+        ctrl.msg.msg_controllen = control.len() as _;
     }
 
     pub(crate) fn update_control(&mut self, control: &RecvMsgControl) {
