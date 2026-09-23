@@ -1,7 +1,9 @@
 use std::mem::MaybeUninit;
 
 use compio_buf::{IoBuf, IoBufExt, IoBufMut, SetLen};
-use compio_io::ancillary::{AncillaryBuf, AncillaryBuilder, AncillaryIter};
+use compio_io::ancillary::{
+    AncillaryBuf, AncillaryBuilder, AncillaryData, AncillaryIter, CodecError, ancillary_space,
+};
 
 fn build_cmsg<B: IoBufMut + ?Sized>(mut builder: AncillaryBuilder<B>) {
     builder.push(0, 0, &()).unwrap(); // 16 / 12
@@ -50,6 +52,29 @@ fn test_cmsg() {
     assert!(buf.buf_len() == 112 || buf.buf_len() == 80);
 
     unsafe { check_cmsg(&buf) }
+}
+
+// The payload passed to `decode` must not include the header counted in
+// `cmsg_len`.
+#[test]
+fn test_cmsg_data_len() {
+    struct DataLen(usize);
+
+    impl AncillaryData for DataLen {
+        fn encode(&self, _: &mut [MaybeUninit<u8>]) -> Result<(), CodecError> {
+            unreachable!()
+        }
+
+        fn decode(buffer: &[u8]) -> Result<Self, CodecError> {
+            Ok(DataLen(buffer.len()))
+        }
+    }
+
+    let mut buf = AncillaryBuf::<{ ancillary_space::<u32>() }>::new();
+    buf.builder().push(0, 0, &0u32).unwrap();
+
+    let cmsg = unsafe { AncillaryIter::new(&buf) }.next().unwrap();
+    assert_eq!(cmsg.data::<DataLen>().unwrap().0, 4);
 }
 
 // Test a custom DST buffer. It checks the compatibility for the previous

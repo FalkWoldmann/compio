@@ -87,25 +87,26 @@ fn msghdr_from_raw(ptr: *const u8, len: usize) -> msghdr {
     msg
 }
 
-pub(crate) struct CMsgRef<'a>(&'a cmsghdr);
+pub(crate) struct CMsgRef<'a> {
+    header: &'a cmsghdr,
+    data: &'a [u8],
+}
 
 impl CMsgRef<'_> {
     pub(crate) fn level(&self) -> i32 {
-        self.0.cmsg_level as _
+        self.header.cmsg_level as _
     }
 
     pub(crate) fn ty(&self) -> i32 {
-        self.0.cmsg_type as _
+        self.header.cmsg_type as _
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.0.cmsg_len as _
+        self.header.cmsg_len as _
     }
 
     pub(crate) fn decode_data<T: AncillaryData>(&self) -> Result<T, CodecError> {
-        let data_ptr = unsafe { CMSG_DATA(self.0) } as *const u8;
-        let buffer = unsafe { slice::from_raw_parts(data_ptr, self.len()) };
-        T::decode(buffer)
+        T::decode(self.data)
     }
 }
 
@@ -151,9 +152,19 @@ impl CMsgIter {
     }
 
     pub(crate) unsafe fn current<'a>(&self, ptr: *const u8) -> Option<CMsgRef<'a>> {
-        self.offset
-            .and_then(|offset| unsafe { ptr.add(offset).cast::<cmsghdr>().as_ref() })
-            .map(CMsgRef)
+        let offset = self.offset?;
+        let header_ptr = unsafe { ptr.add(offset) }.cast::<cmsghdr>();
+        let header = unsafe { &*header_ptr };
+        // `cmsg_len` counts the header, so the payload is shorter by the offset
+        // of `CMSG_DATA`. Also clamp it to the end of the buffer.
+        let data_ptr = unsafe { CMSG_DATA(header_ptr) } as *const u8;
+        let data_offset = data_ptr.addr() - ptr.addr();
+        let cmsg_len: usize = header.cmsg_len as _;
+        let data_len = cmsg_len
+            .saturating_sub(data_offset - offset)
+            .min(self.len.saturating_sub(data_offset));
+        let data = unsafe { slice::from_raw_parts(data_ptr, data_len) };
+        Some(CMsgRef { header, data })
     }
 
     pub(crate) unsafe fn next(&mut self, ptr: *const u8) {
