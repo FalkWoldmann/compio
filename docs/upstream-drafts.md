@@ -3,9 +3,9 @@
 Drafts for compio-rs/compio (and one for rustix). Review and rewrite them in
 your own words before posting. Branch names refer to FalkWoldmann/compio.
 
-Reproducers for everything below are in `docs/reproducers` (one standalone
-file each, verified against master 6d40918). Put them in a gist and replace the
-"(gist link)" placeholders.
+The reproducers are included in full below, in collapsible blocks (also in
+`docs/reproducers`, verified against master 6d40918). Run the Miri ones with
+`cargo +nightly miri run --example <name>`.
 
 Commit messages contain no `#123` references, so pushing to the fork doesn't
 add links to upstream issues. Put "Fixes #..." in the PR description instead.
@@ -52,10 +52,274 @@ away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 > - `RecvMsg::init_control` takes `msg_control` and `msg_controllen` from two
 >   separate `as_uninit()` calls and hands them to `recvmsg`.
 >
-> Reproducers for all of these: (gist link). The `recvmsg` one runs natively: a
-> control buffer whose `as_uninit` alternates between an 8-byte and a 256-byte
-> field makes the kernel write a 32-byte `IP_PKTINFO` message into the 8-byte
-> one and overwrite the bytes after it.
+> The `recvmsg` one below runs natively: a control buffer whose `as_uninit`
+> alternates between an 8-byte and a 256-byte field makes the kernel write a
+> 32-byte `IP_PKTINFO` message into the 8-byte one and overwrite the bytes after
+> it.
+>
+> Reproducers (Miri unless the file says otherwise):
+>
+> <details><summary>Cargo.toml</summary>
+>
+> ```toml
+> [package]
+> name = "compio-ub-repro"
+> version = "0.0.0"
+> edition = "2024"
+> publish = false
+>
+> # compio master at 6d40918
+> [dependencies]
+> compio = { git = "https://github.com/compio-rs/compio", rev = "6d40918", features = ["net", "macros"] }
+> compio-buf = { git = "https://github.com/compio-rs/compio", rev = "6d40918", features = ["bytes"] }
+> compio-io = { git = "https://github.com/compio-rs/compio", rev = "6d40918", features = ["ancillary", "bytemuck"] }
+> bytemuck = "1"
+> bytes = "1"
+> futures-executor = "0.3"
+> libc = "0.2"
+> # compio-io alone does not build under Miri without this (rustix timespec).
+> rustix = { version = "1", features = ["fs"] }
+>
+> [workspace]
+> ```
+>
+> </details>
+>
+> <details><summary><code>examples/as_uninit_vec.rs</code></summary>
+>
+> ```rust
+> // Same bug as #1053, with Vec<u8> instead of [u8; N]. [u8] behaves the same.
+> use std::mem::MaybeUninit;
+>
+> use compio_buf::IoBufMut;
+>
+> fn main() {
+>     let mut v = vec![1u8, 2, 3, 4];
+>     v.as_uninit()[0] = MaybeUninit::uninit();
+>     let x = v[0]; // UB
+>     std::hint::black_box(x);
+> }
+> ```
+>
+> </details>
+>
+> <details><summary><code>examples/iter_uninit_slice.rs</code></summary>
+>
+> ```rust
+> // IoVectoredBufMut::iter_uninit_slice exposes initialized bytes as MaybeUninit.
+> use std::mem::MaybeUninit;
+>
+> use compio_buf::IoVectoredBufMut;
+>
+> fn main() {
+>     let mut bufs = [vec![1u8, 2, 3], vec![4u8, 5, 6]];
+>     for slice in bufs.iter_uninit_slice() {
+>         slice[0] = MaybeUninit::uninit(); // safe
+>     }
+>     let x = bufs[0][0]; // UB: reads uninitialized memory
+>     std::hint::black_box(x);
+> }
+> ```
+>
+> </details>
+>
+> <details><summary><code>examples/copy_within.rs</code></summary>
+>
+> ```rust
+> // IoBufMutExt::copy_within can copy spare capacity over initialized bytes.
+> use compio_buf::IoBufMutExt;
+>
+> fn main() {
+>     let mut v = Vec::with_capacity(8);
+>     v.extend_from_slice(&[1u8, 2, 3, 4]);
+>     v.copy_within(4..8, 0); // safe: copies uninitialized capacity over v[0..4]
+>     let x = v[0]; // UB: reads uninitialized memory
+>     std::hint::black_box(x);
+> }
+> ```
+>
+> </details>
+>
+> <details><summary><code>examples/as_mut_slice_disagree.rs</code></summary>
+>
+> ```rust
+> // as_mut_slice takes its length from as_init and its pointer from as_uninit.
+> // A safe IoBuf/IoBufMut impl where they disagree gives a slice past the
+> // allocation. The only `unsafe` is the empty set_len the trait requires.
+> use std::mem::MaybeUninit;
+>
+> use compio_buf::{IoBuf, IoBufMut, IoBufMutExt, SetLen};
+>
+> struct Lying {
+>     init: Vec<u8>,
+>     spare: [MaybeUninit<u8>; 8],
+> }
+>
+> impl IoBuf for Lying {
+>     fn as_init(&self) -> &[u8] {
+>         &self.init // 1000 bytes
+>     }
+> }
+>
+> impl IoBufMut for Lying {
+>     fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+>         &mut self.spare // 8 bytes
+>     }
+> }
+>
+> impl SetLen for Lying {
+>     unsafe fn set_len(&mut self, _: usize) {}
+> }
+>
+> fn main() {
+>     let mut buf = Lying { init: vec![0; 1000], spare: [MaybeUninit::new(0); 8] };
+>     let s = buf.as_mut_slice(); // UB: 1000-byte slice over 8 bytes
+>     s[999] = 1;
+> }
+> ```
+>
+> </details>
+>
+> <details><summary><code>examples/extend_disagree.rs</code></summary>
+>
+> ```rust
+> // The default reserve computes buf_capacity() - buf_len(), which wraps when
+> // they disagree, and extend_from_slice then writes past the allocation.
+> // Run in release so the subtraction wraps instead of panicking:
+> //   cargo miri run --release --example extend_disagree
+> use std::mem::MaybeUninit;
+>
+> use compio_buf::{IoBuf, IoBufMut, IoBufMutExt, SetLen};
+>
+> struct Lying {
+>     init: Vec<u8>,
+>     spare: Box<[MaybeUninit<u8>; 32]>,
+> }
+>
+> impl IoBuf for Lying {
+>     fn as_init(&self) -> &[u8] {
+>         &self.init // 1024 bytes
+>     }
+> }
+>
+> impl IoBufMut for Lying {
+>     fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+>         &mut *self.spare // 32 bytes
+>     }
+> }
+>
+> impl SetLen for Lying {
+>     unsafe fn set_len(&mut self, _: usize) {}
+> }
+>
+> fn main() {
+>     let mut buf = Lying { init: vec![0; 1024], spare: Box::new([MaybeUninit::new(0); 32]) };
+>     buf.extend_from_slice(&[1, 2, 3, 4]).unwrap(); // UB: writes at offset 1024 of a 32-byte box
+> }
+> ```
+>
+> </details>
+>
+> <details><summary><code>examples/recvmsg_ptr_len.rs</code></summary>
+>
+> ```rust
+> // RecvMsg takes msg_control from one as_uninit() call and msg_controllen
+> // from another. A control buffer whose calls return different slices lets
+> // the kernel write past an 8-byte buffer. Runs natively (not under Miri):
+> //   cargo run --example recvmsg_ptr_len
+> // The canary next to the small buffer gets overwritten.
+> use std::mem::MaybeUninit;
+>
+> use compio_buf::{IoBuf, IoBufMut, SetLen};
+> use compio::net::UdpSocket;
+>
+> #[repr(C, align(8))]
+> struct Control {
+>     empty: [u8; 0],
+>     small: [MaybeUninit<u8>; 8],
+>     canary: [u8; 64],
+>     big: [MaybeUninit<u8>; 256],
+>     calls: usize,
+> }
+>
+> impl IoBuf for Control {
+>     fn as_init(&self) -> &[u8] {
+>         &self.empty
+>     }
+> }
+>
+> impl IoBufMut for Control {
+>     fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+>         self.calls += 1;
+>         if self.calls % 2 == 1 { &mut self.small } else { &mut self.big }
+>     }
+> }
+>
+> impl SetLen for Control {
+>     unsafe fn set_len(&mut self, _: usize) {}
+> }
+>
+> #[compio::main]
+> async fn main() {
+>     let rx = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+>     // Ask for IP_PKTINFO so the kernel returns a 32-byte control message.
+>     unsafe { rx.set_socket_option(libc::IPPROTO_IP, libc::IP_PKTINFO, &1i32) }.unwrap();
+>     let tx = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+>     tx.send_to(b"hi", rx.local_addr().unwrap()).await.unwrap();
+>
+>     let control = Control {
+>         empty: [],
+>         small: [MaybeUninit::new(0); 8],
+>         canary: [0xAA; 64],
+>         big: [MaybeUninit::new(0); 256],
+>         calls: 0,
+>     };
+>     let res = rx.recv_msg(Vec::with_capacity(16), control).await;
+>     let (_, control) = res.1;
+>     let hit = control.canary.iter().filter(|&&b| b != 0xAA).count();
+>     println!("{:?}, canary bytes overwritten: {hit}", res.0.map(|r| r.1));
+> }
+> ```
+>
+> </details>
+>
+> <details><summary><code>examples/bytesmut_as_uninit.rs</code></summary>
+>
+> ```rust
+> // BytesMut::as_uninit builds a capacity-long slice from a pointer that only
+> // covers len() bytes. Plain use, no user impl.
+> use bytes::BytesMut;
+> use compio_buf::IoBufMut;
+>
+> fn main() {
+>     let mut b = BytesMut::with_capacity(16);
+>     b.extend_from_slice(b"abc");
+>     let slice = b.as_uninit(); // UB under Stacked Borrows (retag), len 3 < cap 16
+>     println!("{}", slice.len());
+> }
+> ```
+>
+> </details>
+>
+> <details><summary><code>examples/repeat_advance.rs</code></summary>
+>
+> ```rust
+> // Repeat::read fills the whole buffer from index 0 but advances relative to
+> // the current length, so a non-empty buffer ends up with len > capacity.
+> use compio_io::AsyncRead;
+>
+> fn main() {
+>     futures_executor::block_on(async {
+>         let mut v = Vec::with_capacity(13);
+>         v.extend_from_slice(b"abc");
+>         let cap = v.capacity();
+>         let (n, v) = compio_io::repeat(42).read(v).await.unwrap();
+>         println!("read {n}, len {}, capacity {cap}", v.len()); // Vec::set_len precondition violated
+>     });
+> }
+> ```
+>
+> </details
 >
 > #220 fixed this by making the traits `unsafe`, and #555 removed the markers
 > (its description planned an `unsafe fn buffer()` instead, which never landed).
@@ -126,7 +390,161 @@ away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 >    it with "buffer too short". compio-quic parses every datagram this way. A
 >    non-breaking fix is ready as a separate PR.
 >
-> Full reproducers: (gist link).
+> Full reproducers:
+>
+> <details><summary>Cargo.toml</summary>
+>
+> ```toml
+> [package]
+> name = "compio-ub-repro"
+> version = "0.0.0"
+> edition = "2024"
+> publish = false
+>
+> # compio master at 6d40918
+> [dependencies]
+> compio = { git = "https://github.com/compio-rs/compio", rev = "6d40918", features = ["net", "macros"] }
+> compio-buf = { git = "https://github.com/compio-rs/compio", rev = "6d40918", features = ["bytes"] }
+> compio-io = { git = "https://github.com/compio-rs/compio", rev = "6d40918", features = ["ancillary", "bytemuck"] }
+> bytemuck = "1"
+> bytes = "1"
+> futures-executor = "0.3"
+> libc = "0.2"
+> # compio-io alone does not build under Miri without this (rustix timespec).
+> rustix = { version = "1", features = ["fs"] }
+>
+> [workspace]
+> ```
+>
+> </details>
+>
+> <details><summary><code>examples/ancillary_decode_overread.rs</code></summary>
+>
+> ```rust
+> // CMsgRef::decode_data builds a slice of cmsg_len bytes starting after the
+> // header. cmsg_len includes the header, so the slice runs CMSG_LEN(0) bytes
+> // past the payload. Only visible when the buffer ends right after the message,
+> // as it does after recvmsg with a control buffer of CMSG_SPACE(4) bytes.
+> // Layout is Linux glibc, 64-bit little endian.
+> use compio_io::ancillary::AncillaryIter;
+>
+> fn main() {
+>     // cmsg_len = CMSG_LEN(4) = 20, cmsg_level = 1, cmsg_type = 2, payload 7u32.
+>     // 24 bytes = CMSG_SPACE(4), in an allocation of exactly that size.
+>     let words: Box<[u64]> = Box::new([20, 1 | 2 << 32, 7]);
+>     let bytes: &[u8] = bytemuck::cast_slice(&words);
+>
+>     let msg = unsafe { AncillaryIter::new(bytes) }.next().unwrap();
+>     let value = msg.data::<u32>().unwrap(); // UB: 20-byte slice at offset 16 of 24
+>     assert_eq!(value, 7);
+> }
+> ```
+>
+> </details>
+>
+> <details><summary><code>examples/ancillary_push_aliasing.rs</code></summary>
+>
+> ```rust
+> // AncillaryBuilder::push writes through pointers that Miri rejects:
+> //   cargo miri run --example ancillary_push_aliasing
+> //     Stacked Borrows: payload written through a pointer derived from &mut cmsghdr
+> //   MIRIFLAGS=-Zmiri-tree-borrows cargo miri run --example ancillary_push_aliasing
+> //     Tree Borrows: write through an older pointer after a new &mut borrow
+> use compio_io::ancillary::{AncillaryBuf, ancillary_space};
+>
+> fn main() {
+>     let mut buf = AncillaryBuf::<{ ancillary_space::<u32>() }>::new();
+>     buf.builder().push(1, 2, &7u32).unwrap();
+> }
+> ```
+>
+> </details>
+>
+> <details><summary><code>examples/ancillary_encode_deinit.rs</code></summary>
+>
+> ```rust
+> // AncillaryData is a safe trait, but encode gets &mut [MaybeUninit<u8>] over
+> // bytes that push then marks as initialized. A safe impl can de-initialize them.
+> // push also trips the aliasing bug, so turn aliasing checks off to reach this:
+> //   MIRIFLAGS=-Zmiri-disable-stacked-borrows cargo miri run --example ancillary_encode_deinit
+> use std::mem::MaybeUninit;
+>
+> use compio_io::ancillary::{AncillaryBuf, AncillaryData, CodecError, ancillary_space};
+>
+> struct Deinit;
+>
+> impl AncillaryData for Deinit {
+>     const SIZE: usize = 4;
+>
+>     fn encode(&self, buffer: &mut [MaybeUninit<u8>]) -> Result<(), CodecError> {
+>         buffer[0] = MaybeUninit::uninit(); // safe
+>         Ok(())
+>     }
+>
+>     fn decode(_: &[u8]) -> Result<Self, CodecError> {
+>         Ok(Deinit)
+>     }
+> }
+>
+> fn main() {
+>     let mut buf = AncillaryBuf::<{ ancillary_space::<Deinit>() }>::new();
+>     buf.builder().push(1, 2, &Deinit).unwrap();
+>     let sum: u32 = buf.iter().map(|&b| b as u32).sum(); // UB: reads uninitialized memory
+>     println!("{sum}");
+> }
+> ```
+>
+> </details>
+>
+> <details><summary><code>examples/ancillary_walk_hang.rs</code></summary>
+>
+> ```rust
+> // libc's Linux CMSG_NXTHDR returns the same header again when cmsg_len is
+> // within 7 of usize::MAX, so AncillaryIter never ends on such a buffer.
+> // Not UB. Runs natively:
+> //   cargo run --release --example ancillary_walk_hang   (never ends)
+> //   cargo run --example ancillary_walk_hang             (aborts: overflow panic
+> //                                                        inside extern "C" CMSG_NXTHDR)
+> use compio_io::ancillary::AncillaryIter;
+>
+> fn main() {
+>     // One cmsghdr (Linux glibc, 64-bit): cmsg_len, cmsg_level, cmsg_type.
+>     let mut words = [0u64; 4];
+>     words[0] = u64::MAX - 3;
+>     let bytes: &[u8] = bytemuck::cast_slice(&words);
+>
+>     let iter = unsafe { AncillaryIter::new(bytes) };
+>     let n = iter.take(1_000_000).count();
+>     println!("{n} messages from a 32-byte buffer"); // 1000000
+> }
+> ```
+>
+> </details>
+>
+> <details><summary><code>examples/ancillary_empty_control.rs</code></summary>
+>
+> ```rust
+> // recv_msg returns an empty control buffer for a datagram without control
+> // messages, and AncillaryIter::new panics on it with "buffer too short".
+> // Runs natively: cargo run --example ancillary_empty_control
+> use compio::net::UdpSocket;
+> use compio_io::ancillary::{AncillaryBuf, AncillaryIter};
+>
+> #[compio::main]
+> async fn main() {
+>     let rx = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+>     let tx = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+>     tx.send_to(b"hi", rx.local_addr().unwrap()).await.unwrap();
+>
+>     let res = rx.recv_msg(Vec::with_capacity(16), AncillaryBuf::<64>::new()).await;
+>     let ((_, control_len, _, _), (_, control)) = res.unwrap();
+>     println!("control_len = {control_len}");
+>     let n = unsafe { AncillaryIter::new(&control) }.count(); // panics
+>     println!("{n} messages");
+> }
+> ```
+>
+> </details
 >
 > **Proposed fix** (draft PR: link): parse and build on `&[u8]` / `&mut [u8]`
 > with offsets. Headers are copied in and out of a `#[repr(C)]` mirror of

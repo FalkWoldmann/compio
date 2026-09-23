@@ -1,7 +1,7 @@
 # Reproducers
 
 Against compio master at 6d40918. Each file in `examples/` is standalone and
-short enough to paste into a comment or a gist.
+short enough to paste into a comment. `docs/upstream-drafts.md` includes them in full.
 
 Miri: `cargo +nightly miri run --example <name>`.
 
