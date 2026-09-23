@@ -18,18 +18,18 @@ impl Inconsistent {
     }
 }
 
-impl IoBuf for Inconsistent {
+unsafe impl IoBuf for Inconsistent {
     fn as_init(&self) -> &[u8] {
         &self.init
     }
 }
 
-impl SetLen for Inconsistent {
+unsafe impl SetLen for Inconsistent {
     unsafe fn set_len(&mut self, _len: usize) {}
 }
 
-impl IoBufMut for Inconsistent {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+unsafe impl IoBufMut for Inconsistent {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         &mut self.uninit
     }
 }

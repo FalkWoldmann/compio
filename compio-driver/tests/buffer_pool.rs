@@ -72,7 +72,7 @@ fn buffer_pool_pop_and_use() {
     let mut buf = pool.pop().unwrap();
 
     let data = b"hello compio";
-    let uninit = buf.as_uninit();
+    let uninit = unsafe { buf.as_uninit() };
     uninit[..data.len()]
         .copy_from_slice(unsafe { std::slice::from_raw_parts(data.as_ptr().cast(), data.len()) });
     unsafe { buf.set_len(data.len()) };
@@ -82,7 +82,7 @@ fn buffer_pool_pop_and_use() {
 
 #[test]
 fn buffer_pool_multiple_buffers() {
-    use compio_buf::IoBufMut;
+    use compio_buf::IoBufMutExt;
 
     let mut driver = build_proactor(4, 4096);
 
@@ -95,8 +95,8 @@ fn buffer_pool_multiple_buffers() {
     let mut buf1 = pool.pop().unwrap();
     let mut buf2 = pool.pop().unwrap();
 
-    let p1 = buf1.as_uninit().as_ptr();
-    let p2 = buf2.as_uninit().as_ptr();
+    let p1 = buf1.buf_mut_ptr();
+    let p2 = buf2.buf_mut_ptr();
     assert_ne!(p1, p2);
 
     drop(buf1);
@@ -142,14 +142,14 @@ fn buffer_pool_managed_read() {
 #[cfg(any(not(target_os = "linux"), feature = "polling"))]
 #[test]
 fn buffer_pool_buffer_capacity() {
-    use compio_buf::IoBufMut;
+    use compio_buf::IoBufMutExt;
 
     let mut driver = build_proactor(2, 8192);
 
     let pool = driver.buffer_pool().unwrap();
 
     let mut buf = pool.pop().unwrap().with_capacity(128);
-    assert_eq!(buf.as_uninit().len(), 128);
+    assert_eq!(buf.buf_capacity(), 128);
 }
 
 #[cfg(any(not(target_os = "linux"), feature = "polling"))]

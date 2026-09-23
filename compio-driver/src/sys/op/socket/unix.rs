@@ -100,7 +100,9 @@ impl<T: IoVectoredBuf, C: IoBuf, S: AsFd> SendMsg<T, C, S> {
 
 impl<T: IoBufMut, S: AsFd> Recv<T, S> {
     pub(crate) fn call(&mut self) -> io::Result<usize> {
-        let (_, len) = recv(self.fd.as_fd(), self.buffer.as_uninit(), self.flags)?;
+        // SAFETY: `recv` only writes initialized bytes.
+        let buf = unsafe { self.buffer.as_uninit() };
+        let (_, len) = recv(self.fd.as_fd(), buf, self.flags)?;
 
         Ok(len)
     }
@@ -128,7 +130,9 @@ impl<S: AsFd> RecvFromHeader<S> {
 
 impl<T: IoBufMut, S: AsFd> RecvFrom<T, S> {
     pub(crate) fn call(&mut self) -> io::Result<usize> {
-        let (_, len, addr) = recvfrom(&self.header.fd, self.buffer.as_uninit(), self.header.flags)?;
+        // SAFETY: `recvfrom` only writes initialized bytes.
+        let buf = unsafe { self.buffer.as_uninit() };
+        let (_, len, addr) = recvfrom(&self.header.fd, buf, self.header.flags)?;
 
         self.header.set_addr(addr);
 
@@ -458,7 +462,8 @@ impl<T: IoVectoredBufMut, C: IoBufMut, S> RecvMsg<T, C, S> {
         ctrl.msg.msg_iov = ctrl.slices.as_mut_ptr() as _;
         ctrl.msg.msg_iovlen = ctrl.slices.len() as _;
         // One call, so the pointer and the length describe the same region.
-        let control = self.control.as_uninit();
+        // SAFETY: the kernel only writes initialized bytes.
+        let control = unsafe { self.control.as_uninit() };
         ctrl.msg.msg_control = control.as_mut_ptr() as _;
         ctrl.msg.msg_controllen = control.len() as _;
     }

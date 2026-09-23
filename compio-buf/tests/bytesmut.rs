@@ -10,7 +10,8 @@ fn as_uninit_covers_the_whole_capacity() {
         b.extend_from_slice(&vec![1u8; len]);
 
         let expected = b.capacity();
-        let uninit = b.as_uninit();
+        // SAFETY: only initialized bytes are written.
+        let uninit = unsafe { b.as_uninit() };
         assert_eq!(
             uninit.len(),
             expected,

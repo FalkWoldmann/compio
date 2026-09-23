@@ -115,7 +115,9 @@ pub(crate) trait IoBufMutExt: IoBufMut {
     ///
     /// This will include uninitialized memory.
     fn sys_slice_mut(&mut self) -> SysSlice {
-        SysSlice::from_uninit(self.as_uninit())
+        // SAFETY: only the pointer and length escape, for the kernel to write
+        // initialized bytes through.
+        SysSlice::from_uninit(unsafe { self.as_uninit() })
     }
 }
 
@@ -133,7 +135,8 @@ impl<T: IoVectoredBuf + ?Sized> IoVectoredBufExt for T {}
 pub(crate) trait IoVectoredBufMutExt: IoVectoredBufMut {
     /// Convert a pinned [`IoVectoredBufMut`] into a vector of [`SysSlice`]s.
     fn sys_slices_mut(&mut self) -> Vec<SysSlice> {
-        self.iter_uninit_slice()
+        // SAFETY: as in `sys_slice_mut`.
+        unsafe { self.iter_uninit_slice() }
             .map(SysSlice::from_uninit)
             .collect()
     }

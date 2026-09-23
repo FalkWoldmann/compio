@@ -406,21 +406,21 @@ impl DerefMut for BufferRef {
     }
 }
 
-impl IoBuf for BufferRef {
+unsafe impl IoBuf for BufferRef {
     fn as_init(&self) -> &[u8] {
         self
     }
 }
 
-impl SetLen for BufferRef {
+unsafe impl SetLen for BufferRef {
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= u32::MAX as usize);
         self.len = (len as u32).min(self.cap);
     }
 }
 
-impl IoBufMut for BufferRef {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+unsafe impl IoBufMut for BufferRef {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         // SAFETY: Cap is initialized as the buffer length, and setting it is
         // is capped at full_cap, so it will never exceed buffer length. Pointer
         // is not deallocated.

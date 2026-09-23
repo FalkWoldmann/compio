@@ -9,13 +9,41 @@ use crate::*;
 /// The `IoBuf` trait is implemented by buffer types that can be passed to
 /// immutable completion-based IO operations, like writing its content to a
 /// file. This trait will only take initialized bytes of a buffer into account.
-pub trait IoBuf: 'static {
+///
+/// # Safety
+///
+/// `as_init` must return the same slice on every call until the buffer is
+/// mutated through `&mut self`. IO operations hand its pointer and length to
+/// the kernel, possibly taken from separate calls.
+pub unsafe trait IoBuf: 'static {
     /// Get the slice of initialized bytes.
     fn as_init(&self) -> &[u8];
 }
 
 /// A static assertion that [`IoBuf`] is dyn-compatible (object-safe).
 const _: [&dyn IoBuf; 0] = [];
+
+// Stops compiling (E0199) if these traits stop being `unsafe`.
+const _: () = {
+    #[allow(dead_code)]
+    struct Empty;
+
+    unsafe impl IoBuf for Empty {
+        fn as_init(&self) -> &[u8] {
+            &[]
+        }
+    }
+
+    unsafe impl SetLen for Empty {
+        unsafe fn set_len(&mut self, _len: usize) {}
+    }
+
+    unsafe impl IoBufMut for Empty {
+        unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+            &mut []
+        }
+    }
+};
 
 /// Extension trait for immutable buffers.
 pub trait IoBufExt: IoBuf {
@@ -98,19 +126,19 @@ pub trait IoBufExt: IoBuf {
 
 impl<B: IoBuf + ?Sized> IoBufExt for B {}
 
-impl<B: IoBuf + ?Sized> IoBuf for &'static B {
+unsafe impl<B: IoBuf + ?Sized> IoBuf for &'static B {
     fn as_init(&self) -> &[u8] {
         (**self).as_init()
     }
 }
 
-impl<B: IoBuf + ?Sized> IoBuf for &'static mut B {
+unsafe impl<B: IoBuf + ?Sized> IoBuf for &'static mut B {
     fn as_init(&self) -> &[u8] {
         (**self).as_init()
     }
 }
 
-impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBuf
+unsafe impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBuf
     for t_alloc!(Box, B, A)
 {
     fn as_init(&self) -> &[u8] {
@@ -118,7 +146,7 @@ impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static
     }
 }
 
-impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBuf
+unsafe impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBuf
     for t_alloc!(Rc, B, A)
 {
     fn as_init(&self) -> &[u8] {
@@ -126,37 +154,39 @@ impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static
     }
 }
 
-impl IoBuf for [u8] {
+unsafe impl IoBuf for [u8] {
     fn as_init(&self) -> &[u8] {
         self
     }
 }
 
-impl<const N: usize> IoBuf for [u8; N] {
+unsafe impl<const N: usize> IoBuf for [u8; N] {
     fn as_init(&self) -> &[u8] {
         self
     }
 }
 
-impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBuf for t_alloc!(Vec, u8, A) {
+unsafe impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBuf
+    for t_alloc!(Vec, u8, A)
+{
     fn as_init(&self) -> &[u8] {
         self
     }
 }
 
-impl IoBuf for str {
+unsafe impl IoBuf for str {
     fn as_init(&self) -> &[u8] {
         self.as_bytes()
     }
 }
 
-impl IoBuf for String {
+unsafe impl IoBuf for String {
     fn as_init(&self) -> &[u8] {
         self.as_bytes()
     }
 }
 
-impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBuf
+unsafe impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBuf
     for t_alloc!(Arc, B, A)
 {
     fn as_init(&self) -> &[u8] {
@@ -165,35 +195,35 @@ impl<B: IoBuf + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static
 }
 
 #[cfg(feature = "bytes")]
-impl IoBuf for bytes::Bytes {
+unsafe impl IoBuf for bytes::Bytes {
     fn as_init(&self) -> &[u8] {
         self
     }
 }
 
 #[cfg(feature = "bytes")]
-impl IoBuf for bytes::BytesMut {
+unsafe impl IoBuf for bytes::BytesMut {
     fn as_init(&self) -> &[u8] {
         self
     }
 }
 
 #[cfg(feature = "read_buf")]
-impl IoBuf for std::io::BorrowedBuf<'static, u8> {
+unsafe impl IoBuf for std::io::BorrowedBuf<'static, u8> {
     fn as_init(&self) -> &[u8] {
         self.filled()
     }
 }
 
 #[cfg(feature = "arrayvec")]
-impl<const N: usize> IoBuf for arrayvec::ArrayVec<u8, N> {
+unsafe impl<const N: usize> IoBuf for arrayvec::ArrayVec<u8, N> {
     fn as_init(&self) -> &[u8] {
         self
     }
 }
 
 #[cfg(feature = "smallvec")]
-impl<const N: usize> IoBuf for smallvec::SmallVec<[u8; N]>
+unsafe impl<const N: usize> IoBuf for smallvec::SmallVec<[u8; N]>
 where
     [u8; N]: smallvec::Array<Item = u8>,
 {
@@ -203,14 +233,14 @@ where
 }
 
 #[cfg(feature = "memmap2")]
-impl IoBuf for memmap2::Mmap {
+unsafe impl IoBuf for memmap2::Mmap {
     fn as_init(&self) -> &[u8] {
         self
     }
 }
 
 #[cfg(feature = "memmap2")]
-impl IoBuf for memmap2::MmapMut {
+unsafe impl IoBuf for memmap2::MmapMut {
     fn as_init(&self) -> &[u8] {
         self
     }
@@ -374,10 +404,27 @@ mod smallvec_err {
 /// mutable completion-based IO operations, like reading content from a file and
 /// write to the buffer. This trait will take all space of a buffer into
 /// account, including uninitialized bytes.
-pub trait IoBufMut: IoBuf + SetLen {
+///
+/// # Safety
+///
+/// `as_uninit` must return the same slice on every call until the buffer is
+/// mutated through `&mut self`, and its first `as_init().len()` elements must
+/// be the initialized bytes that `as_init` returns.
+pub unsafe trait IoBufMut: IoBuf + SetLen {
     /// Get the full mutable slice of the buffer, including both initialized
     /// and uninitialized bytes.
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>];
+    ///
+    /// Prefer [`as_mut_slice`](IoBufMutExt::as_mut_slice),
+    /// [`fill_from_slice`](IoBufMutExt::fill_from_slice) or
+    /// [`uninit`](IoBufMutExt::uninit), which are safe.
+    ///
+    /// # Safety
+    ///
+    /// The caller must not de-initialize any of the first
+    /// [`buf_len`](IoBufExt::buf_len) bytes, for example by writing
+    /// `MaybeUninit::uninit()` over them. Reading them afterwards would be
+    /// undefined behavior.
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>];
 
     /// Reserve additional capacity for the buffer.
     ///
@@ -421,6 +468,32 @@ const _: [&dyn IoBufMut; 0] = [];
 
 /// Extension trait for mutable buffers.
 pub trait IoBufMutExt: IoBufMut {
+    /// Copy `src` into the buffer from index 0, overwriting its contents, and
+    /// grow the length to cover the copy. Returns the number of bytes copied,
+    /// `min(src.len(), buf_capacity())`.
+    fn fill_from_slice(&mut self, src: &[u8]) -> usize {
+        // SAFETY: only initialized bytes are written.
+        let uninit = unsafe { self.as_uninit() };
+        let len = src.len().min(uninit.len());
+        uninit[..len].write_copy_of_slice(&src[..len]);
+        // SAFETY: `[0, len)` was just initialized and lies within
+        // `as_uninit()`.
+        unsafe { self.advance_to(len) };
+        len
+    }
+
+    /// Fill the whole buffer with `byte` and grow the length to the capacity.
+    /// Returns the new length.
+    fn fill_bytes(&mut self, byte: u8) -> usize {
+        // SAFETY: only initialized bytes are written.
+        let uninit = unsafe { self.as_uninit() };
+        let len = uninit.len();
+        uninit.fill(MaybeUninit::new(byte));
+        // SAFETY: every byte of `as_uninit()` was just initialized.
+        unsafe { self.advance_to(len) };
+        len
+    }
+
     /// Initialize all bytes in the buffer and return them.
     ///
     /// Bytes in the already-initialized prefix (`0..buf_len()`) are preserved.
@@ -428,29 +501,38 @@ pub trait IoBufMutExt: IoBufMut {
     /// zero-initialized.
     fn ensure_init(&mut self) -> &mut [u8] {
         let len = (*self).buf_len();
-        let slice = self.as_uninit();
+        // SAFETY: only bytes from `len` on are written, with initialized
+        // values.
+        let slice = unsafe { self.as_uninit() };
         slice[len..].fill(MaybeUninit::new(0));
+        // SAFETY: `[0, len)` is the initialized prefix, and the rest was just
+        // zeroed.
         unsafe { slice.assume_init_mut() }
     }
 
     /// Total capacity of the buffer, including both initialized and
     /// uninitialized bytes.
     fn buf_capacity(&mut self) -> usize {
-        self.as_uninit().len()
+        // SAFETY: nothing is written.
+        unsafe { self.as_uninit() }.len()
     }
 
     /// Get the raw mutable pointer to the buffer.
     fn buf_mut_ptr(&mut self) -> *mut MaybeUninit<u8> {
-        self.as_uninit().as_mut_ptr()
+        // SAFETY: nothing is written here, and writing through the returned
+        // pointer is `unsafe` for the caller.
+        unsafe { self.as_uninit() }.as_mut_ptr()
     }
 
     /// Get the mutable slice of initialized bytes. The content is the same as
     /// [`IoBuf::as_init`], but mutable.
     fn as_mut_slice(&mut self) -> &mut [u8] {
         let len = (*self).buf_len();
-        let uninit = self.as_uninit();
-        // `as_init` and `as_uninit` are safe methods and need not agree, so
-        // clamp to what `as_uninit` returned. Loud in debug builds.
+        // SAFETY: nothing is written, and the prefix is returned as `&mut
+        // [u8]`.
+        let uninit = unsafe { self.as_uninit() };
+        // Clamp in case an implementation breaks its contract. Loud in debug
+        // builds.
         debug_assert!(
             len <= uninit.len(),
             "IoBuf::as_init reports {len} initialized bytes but IoBufMut::as_uninit exposes only \
@@ -458,6 +540,7 @@ pub trait IoBufMutExt: IoBufMut {
             uninit.len(),
         );
         let n = len.min(uninit.len());
+
         // SAFETY:
         // - the lifetime of the returned slice is bounded by `&mut self`
         // - `[0, n)` is within `as_uninit()`, and those bytes are the buffer's
@@ -477,10 +560,8 @@ pub trait IoBufMutExt: IoBufMut {
         let init = (*self).buf_len();
         self.reserve(len)?;
 
-        // Bound the write by the slice `as_uninit` returns, not by what
-        // `reserve` reported: both are safe methods and need not agree.
-        let dst = self
-            .as_uninit()
+        // SAFETY: only initialized bytes are written, from `init` on.
+        let dst = unsafe { self.as_uninit() }
             .get_mut(init..)
             .and_then(|tail| tail.get_mut(..len))
             .ok_or(ReserveError::NotSupported)?;
@@ -512,7 +593,9 @@ pub trait IoBufMutExt: IoBufMut {
         use std::ops::Bound;
 
         let init = (*self).buf_len();
-        let uninit = self.as_uninit();
+        // SAFETY: the assertion below keeps bytes from at or above `init` out
+        // of `[0, init)`.
+        let uninit = unsafe { self.as_uninit() };
         let start = match src.start_bound() {
             Bound::Included(&n) => n,
             Bound::Excluded(&n) => n.checked_add(1).expect("out of range"),
@@ -584,9 +667,9 @@ pub trait IoBufMutExt: IoBufMut {
 
 impl<B: IoBufMut + ?Sized> IoBufMutExt for B {}
 
-impl<B: IoBufMut + ?Sized> IoBufMut for &'static mut B {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
-        (**self).as_uninit()
+unsafe impl<B: IoBufMut + ?Sized> IoBufMut for &'static mut B {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+        unsafe { (**self).as_uninit() }
     }
 
     fn reserve(&mut self, len: usize) -> Result<(), ReserveError> {
@@ -598,11 +681,11 @@ impl<B: IoBufMut + ?Sized> IoBufMut for &'static mut B {
     }
 }
 
-impl<B: IoBufMut + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBufMut
+unsafe impl<B: IoBufMut + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBufMut
     for t_alloc!(Box, B, A)
 {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
-        (**self).as_uninit()
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+        unsafe { (**self).as_uninit() }
     }
 
     fn reserve(&mut self, len: usize) -> Result<(), ReserveError> {
@@ -614,8 +697,10 @@ impl<B: IoBufMut + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'sta
     }
 }
 
-impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBufMut for t_alloc!(Vec, u8, A) {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+unsafe impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBufMut
+    for t_alloc!(Vec, u8, A)
+{
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         let cap = self.capacity();
         // SAFETY: Vec guarantees that the pointer is valid for `capacity` bytes
@@ -649,8 +734,8 @@ impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> IoBufMut for t_al
     }
 }
 
-impl IoBufMut for [u8] {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+unsafe impl IoBufMut for [u8] {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         let len = self.len();
         // SAFETY: slice is fully initialized, so treating it as MaybeUninit is
@@ -659,8 +744,8 @@ impl IoBufMut for [u8] {
     }
 }
 
-impl<const N: usize> IoBufMut for [u8; N] {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+unsafe impl<const N: usize> IoBufMut for [u8; N] {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         // SAFETY: array is fully initialized, so treating it as MaybeUninit is
         // safe
@@ -669,8 +754,8 @@ impl<const N: usize> IoBufMut for [u8; N] {
 }
 
 #[cfg(feature = "bytes")]
-impl IoBufMut for bytes::BytesMut {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+unsafe impl IoBufMut for bytes::BytesMut {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let len = self.len();
         let cap = self.capacity();
 
@@ -713,8 +798,8 @@ impl IoBufMut for bytes::BytesMut {
 }
 
 #[cfg(feature = "read_buf")]
-impl IoBufMut for std::io::BorrowedBuf<'static, u8> {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+unsafe impl IoBufMut for std::io::BorrowedBuf<'static, u8> {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let total_cap = self.capacity();
 
         // SAFETY: We reconstruct the full buffer from the filled portion
@@ -728,8 +813,8 @@ impl IoBufMut for std::io::BorrowedBuf<'static, u8> {
 }
 
 #[cfg(feature = "arrayvec")]
-impl<const N: usize> IoBufMut for arrayvec::ArrayVec<u8, N> {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+unsafe impl<const N: usize> IoBufMut for arrayvec::ArrayVec<u8, N> {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         // SAFETY: ArrayVec guarantees that the pointer is valid for N bytes
         unsafe { std::slice::from_raw_parts_mut(ptr, N) }
@@ -737,11 +822,11 @@ impl<const N: usize> IoBufMut for arrayvec::ArrayVec<u8, N> {
 }
 
 #[cfg(feature = "smallvec")]
-impl<const N: usize> IoBufMut for smallvec::SmallVec<[u8; N]>
+unsafe impl<const N: usize> IoBufMut for smallvec::SmallVec<[u8; N]>
 where
     [u8; N]: smallvec::Array<Item = u8>,
 {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let ptr = self.as_mut_ptr() as *mut MaybeUninit<u8>;
         let cap = self.capacity();
         // SAFETY: SmallVec guarantees that the pointer is valid for `capacity`
@@ -780,15 +865,22 @@ where
 }
 
 #[cfg(feature = "memmap2")]
-impl IoBufMut for memmap2::MmapMut {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
-        // Safety: &mut [u8] is valid &mut [MaybeUninit<u8>]
+// Safety: &mut [u8] is valid &mut [MaybeUninit<u8>]
+unsafe impl IoBufMut for memmap2::MmapMut {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         unsafe { std::mem::transmute(self.as_mut()) }
     }
 }
 
 /// A helper trait for `set_len` like methods.
-pub trait SetLen {
+///
+/// # Safety
+///
+/// After a call that meets `set_len`'s own contract, the buffer must still meet
+/// the [`IoBuf`] and [`IoBufMut`] requirements: `as_init` may not report bytes
+/// that are uninitialized or past `as_uninit`. A fixed, fully initialized
+/// buffer such as `[u8; N]` may ignore `len`.
+pub unsafe trait SetLen {
     /// Set the buffer length.
     ///
     /// # Safety
@@ -865,13 +957,13 @@ pub trait SetLenExt: SetLen {
 
 impl<B: SetLen + ?Sized> SetLenExt for B {}
 
-impl<B: SetLen + ?Sized> SetLen for &'static mut B {
+unsafe impl<B: SetLen + ?Sized> SetLen for &'static mut B {
     unsafe fn set_len(&mut self, len: usize) {
         unsafe { (**self).set_len(len) }
     }
 }
 
-impl<B: SetLen + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> SetLen
+unsafe impl<B: SetLen + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'static> SetLen
     for t_alloc!(Box, B, A)
 {
     unsafe fn set_len(&mut self, len: usize) {
@@ -879,33 +971,35 @@ impl<B: SetLen + ?Sized, #[cfg(feature = "allocator_api")] A: Allocator + 'stati
     }
 }
 
-impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> SetLen for t_alloc!(Vec, u8, A) {
+unsafe impl<#[cfg(feature = "allocator_api")] A: Allocator + 'static> SetLen
+    for t_alloc!(Vec, u8, A)
+{
     unsafe fn set_len(&mut self, len: usize) {
         unsafe { self.set_len(len) };
     }
 }
 
-impl SetLen for [u8] {
+unsafe impl SetLen for [u8] {
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= self.len());
     }
 }
 
-impl<const N: usize> SetLen for [u8; N] {
+unsafe impl<const N: usize> SetLen for [u8; N] {
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= N);
     }
 }
 
 #[cfg(feature = "bytes")]
-impl SetLen for bytes::BytesMut {
+unsafe impl SetLen for bytes::BytesMut {
     unsafe fn set_len(&mut self, len: usize) {
         unsafe { self.set_len(len) };
     }
 }
 
 #[cfg(feature = "read_buf")]
-impl SetLen for std::io::BorrowedBuf<'static, u8> {
+unsafe impl SetLen for std::io::BorrowedBuf<'static, u8> {
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(self.capacity() >= len);
 
@@ -919,7 +1013,7 @@ impl SetLen for std::io::BorrowedBuf<'static, u8> {
 }
 
 #[cfg(feature = "arrayvec")]
-impl<const N: usize> SetLen for arrayvec::ArrayVec<u8, N> {
+unsafe impl<const N: usize> SetLen for arrayvec::ArrayVec<u8, N> {
     unsafe fn set_len(&mut self, len: usize) {
         if (**self).buf_len() < len {
             unsafe { self.set_len(len) };
@@ -928,7 +1022,7 @@ impl<const N: usize> SetLen for arrayvec::ArrayVec<u8, N> {
 }
 
 #[cfg(feature = "smallvec")]
-impl<const N: usize> SetLen for smallvec::SmallVec<[u8; N]>
+unsafe impl<const N: usize> SetLen for smallvec::SmallVec<[u8; N]>
 where
     [u8; N]: smallvec::Array<Item = u8>,
 {
@@ -940,25 +1034,25 @@ where
 }
 
 #[cfg(feature = "memmap2")]
-impl SetLen for memmap2::MmapMut {
+unsafe impl SetLen for memmap2::MmapMut {
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= self.len())
     }
 }
 
-impl<T: IoBufMut> SetLen for [T] {
+unsafe impl<T: IoBufMut> SetLen for [T] {
     unsafe fn set_len(&mut self, len: usize) {
         unsafe { default_set_len(self.iter_mut(), len) }
     }
 }
 
-impl<T: IoBufMut, const N: usize> SetLen for [T; N] {
+unsafe impl<T: IoBufMut, const N: usize> SetLen for [T; N] {
     unsafe fn set_len(&mut self, len: usize) {
         unsafe { default_set_len(self.iter_mut(), len) }
     }
 }
 
-impl<T: IoBufMut, #[cfg(feature = "allocator_api")] A: Allocator + 'static> SetLen
+unsafe impl<T: IoBufMut, #[cfg(feature = "allocator_api")] A: Allocator + 'static> SetLen
     for t_alloc!(Vec, T, A)
 {
     unsafe fn set_len(&mut self, len: usize) {
@@ -967,14 +1061,14 @@ impl<T: IoBufMut, #[cfg(feature = "allocator_api")] A: Allocator + 'static> SetL
 }
 
 #[cfg(feature = "arrayvec")]
-impl<T: IoBufMut, const N: usize> SetLen for arrayvec::ArrayVec<T, N> {
+unsafe impl<T: IoBufMut, const N: usize> SetLen for arrayvec::ArrayVec<T, N> {
     unsafe fn set_len(&mut self, len: usize) {
         unsafe { default_set_len(self.iter_mut(), len) }
     }
 }
 
 #[cfg(feature = "smallvec")]
-impl<T: IoBufMut, const N: usize> SetLen for smallvec::SmallVec<[T; N]>
+unsafe impl<T: IoBufMut, const N: usize> SetLen for smallvec::SmallVec<[T; N]>
 where
     [T; N]: smallvec::Array<Item = T>,
 {
@@ -1095,5 +1189,53 @@ mod test {
         let mut buf = [];
         let res = IoBufMutExt::extend_from_slice(&mut buf, b" ");
         assert!(res.is_err_and(|x| x.is_not_supported()));
+    }
+}
+#[cfg(test)]
+mod contract_tests {
+    use crate::*;
+
+    /// Checks the `IoBuf` and `IoBufMut` requirements that unsafe code relies
+    /// on: stable pointers and lengths, and an initialized prefix at the start
+    /// of `as_uninit`.
+    fn check<B: IoBufMut>(mut buf: B) {
+        let (ptr, len) = (buf.as_init().as_ptr(), buf.buf_len());
+        assert_eq!((buf.as_init().as_ptr(), buf.buf_len()), (ptr, len));
+        let (base, cap) = (buf.buf_mut_ptr(), buf.buf_capacity());
+        assert_eq!((buf.buf_mut_ptr(), buf.buf_capacity()), (base, cap));
+        assert!(len <= cap);
+        if len > 0 {
+            assert_eq!(ptr, base.cast_const().cast());
+        }
+    }
+
+    #[test]
+    fn in_tree_buffers_meet_the_contract() {
+        let mut v = Vec::with_capacity(16);
+        v.extend_from_slice(b"abc");
+        check(v.clone());
+        check(v.clone().slice(1..));
+        check(v.uninit());
+        check([1u8; 8]);
+        #[cfg(feature = "bytes")]
+        {
+            let mut b = bytes::BytesMut::with_capacity(16);
+            b.extend_from_slice(b"abc");
+            check(b);
+        }
+        #[cfg(feature = "arrayvec")]
+        {
+            let mut a = arrayvec::ArrayVec::<u8, 8>::new();
+            a.push(1);
+            check(a);
+        }
+        #[cfg(feature = "smallvec")]
+        {
+            let mut s = smallvec::SmallVec::<[u8; 4]>::new();
+            s.extend_from_slice(b"ab");
+            check(s.clone());
+            s.extend_from_slice(b"cdef");
+            check(s);
+        }
     }
 }

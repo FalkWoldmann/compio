@@ -198,22 +198,22 @@ impl<const N: usize> Default for AncillaryBuf<N> {
     }
 }
 
-impl<const N: usize> IoBuf for AncillaryBuf<N> {
+unsafe impl<const N: usize> IoBuf for AncillaryBuf<N> {
     fn as_init(&self) -> &[u8] {
         &self.inner[..self.len]
     }
 }
 
-impl<const N: usize> SetLen for AncillaryBuf<N> {
+unsafe impl<const N: usize> SetLen for AncillaryBuf<N> {
     unsafe fn set_len(&mut self, len: usize) {
         debug_assert!(len <= N);
         self.len = len;
     }
 }
 
-impl<const N: usize> IoBufMut for AncillaryBuf<N> {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
-        self.inner.as_uninit()
+unsafe impl<const N: usize> IoBufMut for AncillaryBuf<N> {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+        unsafe { self.inner.as_uninit() }
     }
 }
 

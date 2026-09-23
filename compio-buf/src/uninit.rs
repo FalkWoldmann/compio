@@ -36,16 +36,17 @@ impl<T> Uninit<T> {
     }
 }
 
-impl<T: IoBuf> IoBuf for Uninit<T> {
+unsafe impl<T: IoBuf> IoBuf for Uninit<T> {
     fn as_init(&self) -> &[u8] {
         self.0.as_init() // this is always &[] but we can't return &[] since the pointer will be different
     }
 }
 
-impl<T: IoBufMut> IoBufMut for Uninit<T> {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+unsafe impl<T: IoBufMut> IoBufMut for Uninit<T> {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let len = (*self).buf_len();
-        &mut self.0.as_uninit()[len..]
+        let all = unsafe { self.0.as_uninit() };
+        &mut all[len..]
     }
 
     fn reserve(&mut self, len: usize) -> Result<(), ReserveError> {
@@ -57,7 +58,7 @@ impl<T: IoBufMut> IoBufMut for Uninit<T> {
     }
 }
 
-impl<T: SetLen + IoBuf> SetLen for Uninit<T> {
+unsafe impl<T: SetLen + IoBuf> SetLen for Uninit<T> {
     unsafe fn set_len(&mut self, len: usize) {
         unsafe {
             self.0.set_len(len);

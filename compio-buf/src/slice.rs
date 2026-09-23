@@ -176,16 +176,16 @@ impl<T: IoBufMut> DerefMut for Slice<T> {
     }
 }
 
-impl<T: IoBuf> IoBuf for Slice<T> {
+unsafe impl<T: IoBuf> IoBuf for Slice<T> {
     fn as_init(&self) -> &[u8] {
         self.deref()
     }
 }
 
-impl<T: IoBufMut> IoBufMut for Slice<T> {
-    fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
+unsafe impl<T: IoBufMut> IoBufMut for Slice<T> {
+    unsafe fn as_uninit(&mut self) -> &mut [MaybeUninit<u8>] {
         let range = self.range();
-        let bytes = self.buffer.as_uninit();
+        let bytes = unsafe { self.buffer.as_uninit() };
         &mut bytes[range]
     }
 
@@ -208,7 +208,7 @@ impl<T: IoBufMut> IoBufMut for Slice<T> {
     }
 }
 
-impl<T: SetLen> SetLen for Slice<T> {
+unsafe impl<T: SetLen> SetLen for Slice<T> {
     unsafe fn set_len(&mut self, len: usize) {
         unsafe { self.buffer.set_len(self.begin + len) }
     }
@@ -286,7 +286,7 @@ impl<T> VectoredSlice<T> {
     }
 }
 
-impl<T: IoVectoredBuf> IoVectoredBuf for VectoredSlice<T> {
+unsafe impl<T: IoVectoredBuf> IoVectoredBuf for VectoredSlice<T> {
     fn iter_slice(&self) -> impl Iterator<Item = &[u8]> {
         let mut offset = self.offset;
         self.buf.iter_slice().skip(self.idx).map(move |buf| {
@@ -297,20 +297,22 @@ impl<T: IoVectoredBuf> IoVectoredBuf for VectoredSlice<T> {
     }
 }
 
-impl<T: SetLen> SetLen for VectoredSlice<T> {
+unsafe impl<T: SetLen> SetLen for VectoredSlice<T> {
     unsafe fn set_len(&mut self, len: usize) {
         unsafe { self.buf.set_len(self.begin + len) }
     }
 }
 
-impl<T: IoVectoredBufMut> IoVectoredBufMut for VectoredSlice<T> {
-    fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
+unsafe impl<T: IoVectoredBufMut> IoVectoredBufMut for VectoredSlice<T> {
+    unsafe fn iter_uninit_slice(&mut self) -> impl Iterator<Item = &mut [MaybeUninit<u8>]> {
         let mut offset = self.offset;
-        self.buf.iter_uninit_slice().skip(self.idx).map(move |buf| {
-            let ret = &mut buf[offset..];
-            offset = 0;
-            ret
-        })
+        unsafe { self.buf.iter_uninit_slice() }
+            .skip(self.idx)
+            .map(move |buf| {
+                let ret = &mut buf[offset..];
+                offset = 0;
+                ret
+            })
     }
 }
 
