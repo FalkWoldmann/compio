@@ -31,3 +31,11 @@ Miri: `cargo +nightly miri run --example <name>`.
 | `ancillary_push_aliasing` | Miri (SB), `MIRIFLAGS=-Zmiri-tree-borrows` (TB) | retag error (SB), forbidden reborrow (TB) |
 | `ancillary_encode_deinit` | `MIRIFLAGS=-Zmiri-disable-stacked-borrows` | reading uninitialized memory |
 | `ancillary_walk_hang` | native, `--release` | iterator never ends (debug build aborts in libc) |
+| `ancillary_empty_control` | native | `buffer too short` panic on a datagram without control data (N9) |
+
+## Build
+
+`compio-io` with `ancillary` alone doesn't build on Linux with rustix 1.1.5
+(N6): `cargo check` in a crate that depends only on `compio-io` fails with
+`cannot find timespec in the crate root`. `Cargo.toml` here works around it
+by enabling rustix's `fs` feature.

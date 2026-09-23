@@ -1,15 +1,18 @@
 # Upstream drafts
 
-Drafts for compio-rs/compio. Review and rewrite them in your own words before
-posting. Branch names refer to FalkWoldmann/compio.
+Drafts for compio-rs/compio (and one for rustix). Review and rewrite them in
+your own words before posting. Branch names refer to FalkWoldmann/compio.
 
 Reproducers for everything below are in `docs/reproducers` (one standalone
 file each, verified against master 6d40918). Put them in a gist and replace the
 "(gist link)" placeholders.
 
-Order: post 1 and 2 first (each can link its draft PR). The PRs in 4 to 8 don't
-depend on either discussion and can go up right away. 3 and 9 wait for the
-answers to 2 and 1.
+Commit messages contain no `#123` references, so pushing to the fork doesn't
+add links to upstream issues. Put "Fixes #..." in the PR description instead.
+
+Order: post 1 and 2 first (each can link its draft PR). The non-breaking PRs
+(4 to 8 and 10 to 12) don't depend on either discussion and can go up right
+away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 
 ---
 
@@ -19,8 +22,8 @@ answers to 2 and 1.
 >
 > **Same bug, other routes.** `IoVectoredBufMut::iter_uninit_slice` is the
 > vectored version of `as_uninit` and has the same problem. `IoBufMutExt::copy_within`
-> is safe and can copy uninitialized bytes over the initialized prefix. Besides
-> `[u8; N]`, I reproduced it with `Vec<u8>` and `&mut [u8]`. `BytesMut`,
+> is safe and can copy uninitialized spare capacity over the initialized prefix.
+> Besides `[u8; N]`, I reproduced it with `Vec<u8>` and `&mut [u8]`. `BytesMut`,
 > `ArrayVec`, `SmallVec` and `MmapMut` expose their full capacity the same way.
 >
 > ```rust
@@ -49,7 +52,7 @@ answers to 2 and 1.
 > - `RecvMsg::init_control` takes `msg_control` and `msg_controllen` from two
 >   separate `as_uninit()` calls and hands them to `recvmsg`.
 >
-> Reproducers for all three: (gist link). The `recvmsg` one runs natively: a
+> Reproducers for all of these: (gist link). The `recvmsg` one runs natively: a
 > control buffer whose `as_uninit` alternates between an 8-byte and a 256-byte
 > field makes the kernel write a 32-byte `IP_PKTINFO` message into the 8-byte
 > one and overwrite the bytes after it.
@@ -57,20 +60,21 @@ answers to 2 and 1.
 > #220 fixed this by making the traits `unsafe`, and #555 removed the markers
 > (its description planned an `unsafe fn buffer()` instead, which never landed).
 >
+> **Non-breaking fixes (PRs ready):** clamp in `as_mut_slice`, saturating
+> `reserve`, one call for pointer and length, and a `copy_within` that panics
+> instead of moving spare capacity into the initialized prefix. Plus two bugs
+> Miri found along the way: `BytesMut::as_uninit` provenance and a
+> `Repeat::read` length bug.
+>
 > **Proposal (breaking, for the next minor):**
 >
 > 1. Restore `unsafe trait` on `IoBuf`, `IoBufMut`, `IoVectoredBuf`,
->    `IoVectoredBufMut` and `SetLen`, with the obligations written down.
-> 2. Make `as_uninit`, `iter_uninit_slice` and `copy_within` `unsafe fn`.
+>    `IoVectoredBufMut` and `SetLen`, with the requirements written down.
+> 2. Make `as_uninit` and `iter_uninit_slice` `unsafe fn`, and add safe
+>    `fill_from_slice` / `fill_bytes` for the common case.
 >
-> I have this ready as one PR, and can split the two parts if you prefer.
-> Independently of that, I have
-> non-breaking PRs ready for the three cases above (clamp in `as_mut_slice`,
-> saturating `reserve`, one call for pointer and length) plus a `BytesMut`
-> provenance bug that Miri found along the way, and a `Repeat::read` length bug
-> (reproducers in the same gist).
->
-> Would you accept the breaking part?
+> I have this ready as one PR on top of the non-breaking ones. Would you accept
+> it?
 
 ---
 
@@ -117,13 +121,18 @@ answers to 2 and 1.
 >    but a corrupt buffer hangs the caller (debug builds abort on an overflow
 >    inside libc instead).
 >
+> 5. **Panic on empty control data.** `recv_msg` returns an empty control buffer
+>    for a datagram without control messages, and `AncillaryIter::new` panics on
+>    it with "buffer too short". compio-quic parses every datagram this way. A
+>    non-breaking fix is ready as a separate PR.
+>
 > Full reproducers: (gist link).
 >
 > **Proposed fix** (draft PR: link): parse and build on `&[u8]` / `&mut [u8]`
 > with offsets. Headers are copied in and out of a `#[repr(C)]` mirror of
 > `cmsghdr` deriving `bytemuck::Pod`, checked against libc's layout by `const`
 > asserts on every target. No pointers into the buffer remain, and there is no
-> runtime `unsafe` in the parser or builder.
+> runtime `unsafe` in the parser or builder. Parsing gets about 30% faster.
 >
 > **Breaking:** fixing 3 needs `encode(&self, buffer: &mut [u8])`. Only
 > hand-written `impl AncillaryData` blocks are affected, and the change is
@@ -152,9 +161,11 @@ answers to 2 and 1.
 >   compile error.
 > - The walk follows the `libc` crate's Linux `CMSG_NXTHDR` with checked
 >   arithmetic, so a bad `cmsg_len` ends the walk instead of overrunning or
->   looping. The payload slice is clamped to the buffer.
+>   looping. The payload slice is clamped to the buffer. Any buffer is accepted,
+>   including empty and unaligned ones.
 > - The builder keeps an offset, grows the buffer with `extend_from_slice` and
->   rolls back with the new `SetLenExt::truncate` if `encode` fails.
+>   rolls back with the new `SetLenExt::truncate` if `encode` fails. It only
+>   checks alignment; a short buffer fails the push with `BufferTooSmall`.
 > - The pktinfo codecs and the bytemuck blanket impl use `to_ne_bytes` and
 >   `bytes_of` instead of raw copies.
 >
@@ -163,29 +174,35 @@ answers to 2 and 1.
 >
 > **Breaking:** `AncillaryData::encode` takes `&mut [u8]`. `AncillaryIter::new`
 > is safe now. The `ancillary` feature enables `bytemuck`.
+> `AncillaryBuilder::new` no longer panics on a short buffer.
 >
 > **Tests:** regression tests for each bug, pktinfo round trips, `ancillary_space`
 > against libc's `CMSG_SPACE`, and on Linux a comparison with libc's
 > `CMSG_FIRSTHDR` / `CMSG_NXTHDR` over 20,000 random buffers. The test file passes
-> under Miri with Stacked and Tree Borrows. Parsing is as fast as before; building
-> three messages takes about 30 ns instead of about 20 ns.
+> under Miri with Stacked and Tree Borrows.
+>
+> **Performance** (x86-64, release, median of three runs): parsing three
+> messages takes 12 ns instead of 17 ns. Building them takes 25 ns instead of
+> 18.5 ns, because each push goes through compio-buf's safe buffer methods.
 
 ---
 
 ## 4. PR: `fix/buffer-bounds-hardening`
 
-**Title:** `fix(buf): stop trusting as_init and as_uninit to agree`
+**Title:** `fix(buf): don't trust as_init and as_uninit to agree`
 
+> See #1053.
+>
 > `as_mut_slice` built its slice from `buf_len()` (from `as_init`) and the
 > pointer from `as_uninit`. The default `reserve` computed
 > `buf_capacity() - buf_len()`, which wraps when the two disagree, and
 > `extend_from_slice` trusted that result. With a buffer whose methods disagree,
-> both reach out-of-bounds memory without any `unsafe` at the call site (Miri
-> output in the commit).
+> both reach out-of-bounds memory without any `unsafe` at the call site.
 >
 > Now `as_mut_slice` clamps to what `as_uninit` returned (with a
 > `debug_assert!`), `reserve` saturates, and `extend_from_slice` bounds its write
-> by the slice it actually got. No API change. See #1053.
+> by the slice it actually got and copies with `write_copy_of_slice`, which
+> resolves the FIXME there. No API change.
 
 ---
 
@@ -193,11 +210,13 @@ answers to 2 and 1.
 
 **Title:** `fix(driver): take the control pointer and length from one call`
 
+> See #1053.
+>
 > `RecvMsg::init_control` set `msg_control` from one `as_uninit()` call and
 > `msg_controllen` from another, then passed both to `recvmsg`. `SendMsg` did
 > the same with `buf_ptr()` and `buf_len()`. If a buffer's calls disagree, the
 > kernel gets a pointer into one region and the length of another. Both now take
-> pointer and length from a single call. No API change. See #1053.
+> pointer and length from a single call. No API change.
 
 ---
 
@@ -234,33 +253,107 @@ answers to 2 and 1.
 >
 > It now uses `io_uring::types::RecvMsgOut::parse` from the `io-uring` crate we
 > already depend on, parses once in `new()` and keeps the ranges. Behaviour is
-> unchanged for well-formed buffers; an oversized `namelen` is truncated instead
-> of overflowing. `test_udp_recv_msg_multi` and
-> `test_udp_recv_msg_multi_truncated_datagram` cover this path.
+> unchanged for well-formed buffers. The missing clamp can't be hit with today's
+> kernel address sizes, so this is hardening. `test_udp_recv_msg_multi` and
+> `test_udp_recv_msg_multi_truncated_datagram` cover this path; I also ran IPv4
+> copies of them, since the originals need IPv6.
 
 ---
 
 ## 9. PR: `fix/buffer-trait-soundness`
 
-Open after 4 to 7 are merged (it is stacked on them), or open as a draft and
-say so. Once they merge, only the last commit remains.
+Open after 4 to 7 and 10 are merged (it is stacked on them), or open as a draft
+and say so. Once they merge, only the last commit remains.
 
-**Title:** `fix(buf)!: make the buffer traits unsafe and their uninit accessors unsafe fn`
+**Title:** `fix(buf)!: make the buffer traits unsafe and as_uninit an unsafe fn`
 
 > Fixes #1053.
 >
-> - `as_uninit`, `iter_uninit_slice` and `copy_within` are `unsafe fn`. The
->   caller must not de-initialize bytes below `buf_len()`.
+> - `as_uninit` and `iter_uninit_slice` are `unsafe fn`. The caller must not
+>   de-initialize bytes below `buf_len()`.
 > - `IoBuf`, `IoBufMut`, `IoVectoredBuf`, `IoVectoredBufMut` and `SetLen` are
->   `unsafe trait` again (#220, removed in #555), with the obligations unsafe
->   code relies on written down: stable pointer and length across calls, the
->   initialized prefix inside the extent, idempotent vectored iteration.
+>   `unsafe trait` again (#220, removed in #555), with the requirements unsafe
+>   code relies on written down: stable pointers and lengths across calls, and
+>   the initialized prefix at the start of `as_uninit`.
 > - New safe `fill_from_slice` and `fill_bytes`, so filling a buffer needs no
 >   `unsafe`. Two call sites moved to them.
-> - Static assertions that the traits stay `unsafe`, and a contract test over
->   every in-tree buffer type.
+> - A static assertion that the traits stay `unsafe`, and a test that checks the
+>   in-tree buffer types against the requirements.
 >
-> **Breaking:** `impl IoBuf for T` becomes `unsafe impl`, and callers of the
-> three methods need `unsafe`. Code that only uses buffers is unaffected.
+> **Breaking:** `impl IoBuf for T` becomes `unsafe impl`, and callers of
+> `as_uninit` and `iter_uninit_slice` need `unsafe`. Code that only uses buffers
+> is unaffected.
 >
-> Checked on Linux and with `--target x86_64-pc-windows-msvc`.
+> Checked on Linux and with `--target x86_64-pc-windows-msvc`, and compio-buf's
+> tests under Miri.
+
+---
+
+## 10. PR: `fix/copy-within-init-check`
+
+**Title:** `fix(buf): don't let copy_within move spare capacity into the initialized prefix`
+
+> See #1053.
+>
+> `IoBufMutExt::copy_within` copies within the whole buffer, including spare
+> capacity, and is safe. A copy towards lower indices could move uninitialized
+> bytes over `[0, buf_len())`:
+>
+> ```rust
+> let mut v = Vec::with_capacity(8);
+> v.extend_from_slice(&[1u8, 2, 3, 4]);
+> v.copy_within(4..8, 0);
+> let x = v[0]; // Miri: reading uninitialized memory
+> ```
+>
+> It now panics in exactly that case. Copies within the prefix and copies into
+> spare capacity work as before, including both in-tree callers. No API change.
+
+---
+
+## 11. PR: `fix/ancillary-empty-control`
+
+**Title:** `fix(io): don't panic on empty control data`
+
+> `recv_msg` returns an empty control buffer when a datagram carries no control
+> messages, and `AncillaryIter::new` panicked on it with "buffer too short".
+> compio-quic parses every received datagram this way, and compio-net's
+> `read_with_ancillary` doc example has the same shape.
+>
+> A buffer too short for a header now yields no messages. The builder keeps its
+> length check. No API change.
+
+---
+
+## 12. PR: `fix/compio-io-rustix-net`
+
+**Title:** `build(io): make compio-io build without other compio crates`
+
+> rustix 1.1.5 doesn't build with only its `net` feature on Linux: the `net`
+> sockopt code uses `crate::timespec`, which is gated on other features. In this
+> workspace compio-driver enables more rustix features and hides it, but a crate
+> that depends only on `compio-io` with `ancillary` fails to build.
+>
+> This enables rustix's `time` feature too, which is small and pulls in
+> `timespec`. It can go once rustix fixes the gate (reported upstream: link).
+
+---
+
+## 13. rustix: issue or PR
+
+Patch: `docs/rustix-timespec-net.patch` (one line in `src/lib.rs`).
+
+**Title:** `net: build fails with only the net feature since 1.1.5`
+
+> With `default-features = false, features = ["net", "std"]`, rustix 1.1.5
+> fails to build on Linux:
+>
+> ```
+> error[E0433]: cannot find `timespec` in the crate root
+>    --> src/backend/linux_raw/net/sockopt.rs:293:39
+> ```
+>
+> The `net` sockopt code in both backends uses `crate::timespec`, but the
+> `mod timespec` gate in `lib.rs` doesn't include `net`. 1.1.4 builds. Adding
+> `feature = "net"` to the gate fixes it for the linux_raw and libc backends,
+> no_std and Windows.

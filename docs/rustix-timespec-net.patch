@@ -1,0 +1,12 @@
+diff --git a/src/lib.rs b/src/lib.rs
+index 8109ca2..90943f2 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -393,6 +393,7 @@ mod signal;
+     feature = "runtime",
+     feature = "thread",
+     feature = "time",
++    feature = "net",
+     all(feature = "event", any(bsd, linux_kernel, windows, target_os = "wasi")),
+     all(
+         linux_raw,

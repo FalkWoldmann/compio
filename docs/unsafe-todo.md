@@ -29,19 +29,31 @@ IDs `B1` to `B3` and `2a` to `2e` refer to `docs/soundness.md` on
 ## Branches
 
 Every PR branch is linear on master 6d40918, one commit each (the trait branch
-is stacked on four of them), authored as Falk Woldmann Lu with no trailers and
-unsigned, ready to sign locally. Old tips are listed so nothing is lost.
+is stacked on five of them), authored and committed as Falk Woldmann Lu with no
+trailers and unsigned, ready to sign locally. No commit message contains a
+`#123` reference, and no branch edits a `CHANGELOG.md`.
 
-| Branch | Commit | Draft | Role | Old tip |
-| --- | --- | --- | --- | --- |
-| `fix/iour-recvmsg-out-parse` | 256694b | 8 | N4, non-breaking | e8777cf |
-| `fix/buffer-bounds-hardening` | 7aaff74 | 4 | 2a, 2c, non-breaking | b5e1553 |
-| `fix/buffer-pointer-stability` | 90afe0b | 5 | 2b, non-breaking | 89c00b8 |
-| `fix/bytesmut-as-uninit-provenance` | 3e4e078 | 6 | 2e, non-breaking | 7fd83d8 |
-| `fix/repeat-advance-past-capacity` | c9b61fa | 7 | B3, non-breaking | b247bcc |
-| `fix/buffer-trait-soundness` | 3484f52 | 9 | B1 (#1053) and the 2a to 2e root cause, breaking. Stacked on 4 to 7 | 8a2d7b5 |
-| `fix/ancillary-safe-rewrite` | 7d7b636 | 3 | N1, N2, N3, N7, N8, breaking | 6bf10f2 |
-| `fix/ancillary-decode-overread` | e4a5bb0 | none | N1 only. Fallback if the rewrite is rejected | 01c365f |
+Branches that already existed on the fork were rebuilt, but the fork still has
+the old versions: the new ones are pushed as `rebased/<name>`. After review,
+move each over, for example
+`git push --force-with-lease origin rebased/fix/x:fix/x`, then delete the
+`rebased/` branch. New branches are pushed under their own names.
+
+| Branch | Pushed as | Commit | Draft | Role | Old tip |
+| --- | --- | --- | --- | --- | --- |
+| `fix/iour-recvmsg-out-parse` | `rebased/fix/iour-recvmsg-out-parse` | 256694b | 8 | N4, non-breaking | e8777cf |
+| `fix/buffer-bounds-hardening` | `rebased/fix/buffer-bounds-hardening` | 21906dd | 4 | 2a, 2c, non-breaking | b5e1553 |
+| `fix/buffer-pointer-stability` | `rebased/fix/buffer-pointer-stability` | 60b630c | 5 | 2b, non-breaking | 89c00b8 |
+| `fix/bytesmut-as-uninit-provenance` | `rebased/fix/bytesmut-as-uninit-provenance` | 055b9e6 | 6 | 2e, non-breaking | 7fd83d8 |
+| `fix/repeat-advance-past-capacity` | `rebased/fix/repeat-advance-past-capacity` | 95281ed | 7 | B3, non-breaking | b247bcc |
+| `fix/copy-within-init-check` | `fix/copy-within-init-check` | 9278417 | 10 | B1 via `copy_within`, non-breaking | new |
+| `fix/ancillary-empty-control` | `fix/ancillary-empty-control` | 9147ffc | 11 | N9, non-breaking | new |
+| `fix/compio-io-rustix-net` | `fix/compio-io-rustix-net` | a9082b0 | 12 | N6, non-breaking (rustix workaround) | new |
+| `fix/buffer-trait-soundness` | `rebased/fix/buffer-trait-soundness` | 3b07087 | 9 | B1 (#1053) and the 2a to 2e root cause, breaking. Stacked on 4 to 7 and 10 | 8a2d7b5 |
+| `fix/ancillary-safe-rewrite` | `rebased/fix/ancillary-safe-rewrite` | de6a2aa | 3 | N1, N2, N3, N7, N8, N9, breaking | 6bf10f2 |
+| `fix/ancillary-decode-overread` | `rebased/fix/ancillary-decode-overread` | e4a5bb0 | none | N1 only. Fallback if the rewrite is rejected | 01c365f |
+
+The rustix fix for N6 is `docs/rustix-timespec-net.patch` (draft 13).
 
 Superseded, not used by any draft (candidates for deletion):
 
@@ -65,13 +77,14 @@ Status is given for `master` (M) and for `claude/compio-unsafe-code-e3j5pw` (B).
 | **N2c** | The 2d fix stores a raw `base` pointer from `ensure_init()` next to a live `&mut B`. Moving `buffer` into `Self` retags it, so `base` is invalid on every `push` | `ancillary/mod.rs:138-164` on B | Yes: every `push` | n/a | **introduced** (SB and TB) |
 | **N7** | `AncillaryData::encode` is a safe trait method that receives `&mut [MaybeUninit<u8>]` over bytes the builder already initialized, and `push` then marks them initialized. A safe `encode` that writes `MaybeUninit::uninit()` makes a later safe read UB (confirmed with Miri, Tree Borrows) | `ancillary/sys.rs` `encode_data`, `ancillary/mod.rs` `push` | Yes, with a safe `AncillaryData` impl | open | open |
 | **N8** | `AncillaryIter` loops forever if a `cmsg_len` is within 7 of `usize::MAX`: libc's Linux `CMSG_NXTHDR` wraps `CMSG_ALIGN` to 0 and returns the same header again. A hang, not UB | libc 0.2.189 `CMSG_NXTHDR`, used by `ancillary/sys.rs` | No: needs a corrupt buffer, which `AncillaryIter::new`'s contract rules out | open | open |
+| **N9** | `AncillaryIter::new` panics with "buffer too short" on empty control data, which `recv_msg` returns for a datagram without control messages. compio-quic parses every datagram this way | `ancillary/sys.rs` `CMsgIter::new` | Yes: a datagram without control data | open | open |
 | B1 | `IoBufMut::as_uninit` exposes initialized bytes as `MaybeUninit`, so safe code can de-initialize them. Siblings: `iter_uninit_slice`, `copy_within` | `compio-buf/src/io_buf.rs` | Yes | open | fixed |
 | 2a to 2e | Unsafe code trusts safe buffer-trait methods to agree with each other (`as_mut_slice`, `recvmsg` control pointer and length, `reserve`/`extend_from_slice`, `AncillaryBuilder` base, `BytesMut::as_uninit` provenance) | `compio-buf`, `compio-driver`, `compio-io` | Yes | open | fixed (2d: see N2c) |
 | B3 | `Repeat::read` advances the buffer past its capacity | `compio-io/src/util/repeat.rs` | Yes | open | fixed |
 | **N3** | The `copy_to_bytes`/`copy_from_bytes` unsafe fns have no `# Safety` section. They copy `T::SIZE` bytes, not `size_of::<T>()`, and they are only correct because the blanket impl pins `SIZE` | `ancillary/mod.rs:390-408` | No today | open | open |
 | **N4** | The kernel-reported `namelen` is copied into `SockAddrStorage` with no `min(namelen, NLEN)` | `compio-driver/src/sys/op/managed/iour.rs:690` | No: kernel-trusted | open | open |
 | **N5** | `copy_addr_from` is a safe fn whose only bound on the copy length is a `debug_assert!` | `compio-driver/src/sys/pal/unix/socket.rs:25` | No: relies on rustix's bound | open | open |
-| **N6** | `cargo check -p compio-io --features ancillary` fails to build: rustix 1.1.5 with only `net` hits `cannot find timespec`. Workspace builds hide it through feature unification. It also blocks Miri on `compio-io` | `compio-io/Cargo.toml` | Build only | open | open |
+| **N6** | `cargo check -p compio-io --features ancillary` fails to build: rustix 1.1.5 with only `net` hits `cannot find timespec` (1.1.4 builds; both rustix backends are affected on Linux). Workspace builds hide it through feature unification. It also blocks Miri on `compio-io`. A crate depending only on `compio-io` can't build | `compio-io/Cargo.toml`, rustix `src/lib.rs` | Build only | open | open |
 | G1 | The safety comments in `compio-compat`, `compio-process` and `compio-dispatcher` state intent rather than prove the contract | see `unsafe-review.md` | n/a | open | open |
 | G2 | `compio-driver`, `compio-executor` and `compio-runtime` have not been reviewed to this standard. Topics to cover: temporal scope of kernel-held pointers, reentrancy, safe-trait trust | see `unsafe-review.md` | unknown | open | open |
 | G3 | `AncillaryIter::new`'s `# Safety` section ("should contain valid control messages") is too weak to support N1's fix, or the iterator's own `CMSG_NXTHDR` walk on Windows, which does not reject `cmsg_len < sizeof(CMSGHDR)` | `ancillary/mod.rs:84`, `sys.rs` Windows macros | n/a | open | open |
@@ -133,11 +146,11 @@ Suggested upstream follow-ups:
 ### Fixing #1053: `unsafe fn` vs a safe write-only view
 
 The fix is `fix/buffer-trait-soundness`: `unsafe trait` markers on the five
-buffer traits, and `as_uninit`, `iter_uninit_slice` and `copy_within` as
-`unsafe fn`, in one commit because they are one semver event. It is stacked on
-the four non-breaking buffer fixes it builds on (see Branches). If the
-maintainers want the markers and the `unsafe fn` change reviewed separately,
-the commit splits along its two numbered parts.
+buffer traits, and `as_uninit` and `iter_uninit_slice` as `unsafe fn`, in one
+commit because they are one semver event. `copy_within` no longer needs to
+change its signature: `fix/copy-within-init-check` keeps it safe with a runtime
+check, as a non-breaking PR. The trait branch is stacked on the five
+non-breaking buffer fixes (see Branches).
 
 The issue's other option is a safe accessor that can only write initialized
 bytes, like `bytes::buf::UninitSlice` (or std's unstable `BorrowedCursor`).
@@ -145,7 +158,7 @@ bytes, like `bytes::buf::UninitSlice` (or std's unstable `BorrowedCursor`).
 | | `unsafe fn as_uninit` (branch) | Write-only view (`UninitSlice`-style) |
 | --- | --- | --- |
 | Fixes B1, `iter_uninit_slice` | Yes | Yes |
-| Fixes `copy_within` | Yes (`unsafe fn`) | Needs its own fix either way (a bounds check that keeps it safe works too) |
+| Fixes `copy_within` | Not needed: the non-breaking runtime check covers it | Same |
 | Fixes 2a to 2d | No, needs the `unsafe trait` markers | No, needs the same markers |
 | Implementors | `unsafe fn` in the impl, body unchanged | Return the view, `UninitSlice::uninit(&mut [MaybeUninit<u8>])` is safe |
 | Callers that write initialized bytes | `unsafe` block, or the safe `fill_bytes` / `fill_from_slice` the branch adds | Safe, but no `fill` / indexing: `write_byte` loops or `copy_from_slice` |
@@ -180,8 +193,8 @@ compio's CONTRIBUTING asks for an issue before major changes.
   `SetLen` get back the `unsafe trait` markers that #220 added and #555
   dropped. Point out the siblings (`iter_uninit_slice`, `copy_within`), the
   other affected buffer types, and that the `unsafe fn` alone doesn't fix 2a
-  to 2d.
-- **Open an issue for the ancillary module** (N1, N2, N7, N8). Propose the
+  to 2d. `copy_within` is fixed without a break.
+- **Open an issue for the ancillary module** (N1, N2, N7, N8, N9). Propose the
   slice-based rewrite with `encode(&mut [u8])` as one breaking change. Include
   the evidence: the Miri reproducers, no published crate implements
   `AncillaryData` (125 dependents scanned), the migration is mechanical, and
@@ -197,19 +210,25 @@ by the breaking changes. Any order.
 | `fix/iour-recvmsg-out-parse` | N4 | Ready |
 | `fix/repeat-advance-past-capacity` | B3 | Ready |
 | `fix/bytesmut-as-uninit-provenance` | 2e | Ready |
-| `fix/buffer-bounds-hardening` | 2a, 2c | Ready. After the `unsafe trait` change these checks stay as a second line of defence, and the rewrite relies on the `as_mut_slice` fix |
-| `fix/buffer-pointer-stability` | 2b (driver `recvmsg` / `sendmsg`) | Ready. The ancillary hunk that caused N2c is removed |
-| N6: add the missing rustix feature | `compio-io` builds on its own | Not written (one line) |
+| `fix/buffer-bounds-hardening` | 2a, 2c | Ready. Uses `write_copy_of_slice`. After the `unsafe trait` change these checks stay as a second line of defence, and the rewrite relies on the `as_mut_slice` fix |
+| `fix/buffer-pointer-stability` | 2b (driver `recvmsg` / `sendmsg`) | Ready. One driver-only commit |
+| `fix/copy-within-init-check` | B1 via `copy_within` | Ready. Safe, panics only when spare capacity would move into the prefix |
+| `fix/ancillary-empty-control` | N9 | Ready. The rewrite fixes it too, so this one matters only until the rewrite lands, or if it's rejected |
+| `fix/compio-io-rustix-net` | N6 | Ready. Workaround; the real fix is `docs/rustix-timespec-net.patch` for rustix |
 | Miri CI for `compio-buf`, split out of `ci/miri-compio-buf` | Regression coverage | Not built: today it's stacked on the breaking commit |
 
 All branches are one commit each on master 6d40918, with no merge commits.
+None of them edits a `CHANGELOG.md`: release-plz generates those from commit
+messages. Commit messages don't contain `#123` references, so pushing to the
+fork doesn't link them from upstream issues.
 
 ### 3. When accepted: one breaking release (compio-io 0.11)
 
 - `fix/buffer-trait-soundness`: B1, and the 2a to 2e root cause via the
-  `unsafe trait` markers.
+  `unsafe trait` markers. Rebuilt small: 382 added lines with one-line
+  `// SAFETY:` comments, down from 1,853.
 - `fix/ancillary-safe-rewrite` (one commit on master): N1, N2a to N2c, N3,
-  N7, N8, and a safe `AncillaryIter::new`. Independent of the trait branch:
+  N7, N8, N9, and a safe `AncillaryIter::new`. Independent of the trait branch:
   it also applies cleanly on top of it, and the combination passes the
   ancillary tests, so either can land first.
 - Miri CI job for `compio-io --features ancillary,bytemuck` (needs N6).
@@ -327,6 +346,10 @@ Other notes on C:
 - Performance: see the next section.
 
 ### Performance and efficiency
+
+**Final branch** (`fix/ancillary-safe-rewrite`, 23 Sep, three runs each, x86-64
+release): parsing three messages 12 ns vs 17.3 ns on master, walking 9 ns vs
+11.5 ns, building 25 ns vs 18.5 ns. The figures below are for the prototype.
 
 After two small tuning changes, the safe rewrite is faster than both master and
 the pointer fix: about 2× on building and about 25% on parsing. Building runs
