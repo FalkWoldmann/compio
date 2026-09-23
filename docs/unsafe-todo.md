@@ -319,6 +319,43 @@ a few percent, and the instruction counts are the more reliable signal. Only
 x86-64 Linux was measured. The tuning is committed on
 `prototype/ancillary-safe-slices`; the benchmark harness isn't.
 
+### How big the break is
+
+Only hand-written `impl AncillaryData` blocks break, and no published crate has
+one. The break comes from fixing N7, not from moving to slices: slices alone
+(option B) fix N1, N2 and N8 without changing the API.
+
+| Code that… | Affected? |
+| --- | --- |
+| iterates with `AncillaryIter` and decodes with `data::<T>()` | No |
+| pushes built-in types (integers, arrays, pktinfo) | No |
+| implements `BitwiseAncillaryData` | No; the blanket impl is updated inside compio |
+| uses `AncillaryData` only as a generic bound | No |
+| writes `impl AncillaryData for MyType` by hand | **Yes**: change `encode`'s parameter to `&mut [u8]`; a mechanical edit |
+
+- **Exposure:** the API shipped in compio-io 0.10.0 (27 May 2026). `compio-net`
+  always enables the `ancillary` feature, and the umbrella crate exposes it as
+  `io-ancillary`, so any compio networking user can reach it.
+- **Actual use:** the latest published source of all 125 external crates on
+  crates.io that depend on compio, compio-io, compio-net or compio-quic was
+  downloaded and searched (23 Sep 2026). One crate, comnoq, uses the API: it
+  iterates, decodes, and uses `AncillaryData` as a bound. None implement
+  `AncillaryData`. Private code and code pulled from git can't be checked.
+- **Semver:** a compio-io 0.11 bump. The unsafe-review branch's `unsafe trait`
+  changes need the same bump, so both could ship together.
+
+### Does the rewrite fix N1 and N2?
+
+Yes, all four, checked under Miri with Stacked and Tree Borrows on the tuned
+commit:
+
+| Finding | Test | Master | Rewrite |
+| --- | --- | --- | --- |
+| N1 | Push one message, decode it from an exact-size allocation | UB | Clean |
+| N2a | Same test | UB (SB) | Clean |
+| N2b | Same test, plus three pushes and an overflowing fourth | UB (TB) | Clean |
+| N2c | Builder on a caller-owned `&mut [u8]` | Not on master (unsafe-review branch only) | Clean; the cached pointer no longer exists |
+
 ## bytemuck vs zerocopy for compio
 
 ### Where each could apply
