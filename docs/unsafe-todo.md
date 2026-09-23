@@ -36,6 +36,8 @@ Status is given for `master` (M) and for `claude/compio-unsafe-code-e3j5pw` (B).
 | **N2a** | `CMsgMut` holds `&mut cmsghdr` and derives the payload pointer from it, beyond the header's 16 bytes | `sys.rs:110-127` | Yes: `AncillaryBuf::builder().push()` | open (SB) | open |
 | **N2b** | `self.buffer.advance(cmsg.encode_data(value)?)` activates a two-phase `&mut` borrow of `buffer`, then writes through an older pointer | `ancillary/mod.rs:154` | Yes: every `push` | open (TB) | open |
 | **N2c** | The 2d fix stores a raw `base` pointer from `ensure_init()` next to a live `&mut B`. Moving `buffer` into `Self` retags it, so `base` is invalid on every `push` | `ancillary/mod.rs:138-164` on B | Yes: every `push` | n/a | **introduced** (SB and TB) |
+| **N7** | `AncillaryData::encode` is a safe trait method that receives `&mut [MaybeUninit<u8>]` over bytes the builder already initialized, and `push` then marks them initialized. A safe `encode` that writes `MaybeUninit::uninit()` makes a later safe read UB (confirmed with Miri, Tree Borrows) | `ancillary/sys.rs` `encode_data`, `ancillary/mod.rs` `push` | Yes, with a safe `AncillaryData` impl | open | open |
+| **N8** | `AncillaryIter` loops forever if a `cmsg_len` is within 7 of `usize::MAX`: libc's Linux `CMSG_NXTHDR` wraps `CMSG_ALIGN` to 0 and returns the same header again. A hang, not UB | libc 0.2.189 `CMSG_NXTHDR`, used by `ancillary/sys.rs` | No: needs a corrupt buffer, which `AncillaryIter::new`'s contract rules out | open | open |
 | B1 | `IoBufMut::as_uninit` exposes initialized bytes as `MaybeUninit`, so safe code can de-initialize them. Siblings: `iter_uninit_slice`, `copy_within` | `compio-buf/src/io_buf.rs` | Yes | open | fixed |
 | 2a to 2e | Unsafe code trusts safe buffer-trait methods to agree with each other (`as_mut_slice`, `recvmsg` control pointer and length, `reserve`/`extend_from_slice`, `AncillaryBuilder` base, `BytesMut::as_uninit` provenance) | `compio-buf`, `compio-driver`, `compio-io` | Yes | open | fixed (2d: see N2c) |
 | B3 | `Repeat::read` advances the buffer past its capacity | `compio-io/src/util/repeat.rs` | Yes | open | fixed |
@@ -217,6 +219,48 @@ the std source for `nightly-2026-09-15`.
 
 Suggested next step: switch `iour.rs` to `RecvMsgOut::parse` as a P2 change. It
 is small and self-contained, and it closes N4.
+
+## N1 and N2: pointer fix vs safe slice rewrite
+
+The safe rewrite fixes N1, N2a to N2c, N7 and N8 by construction, and takes the
+ancillary core from 22 `unsafe` keywords to 5. The cost is a breaking change to
+`AncillaryData::encode` and about 300 changed lines. The pointer fix on
+`fix/ancillary-decode-overread` fixes only N1, but it is small and non-breaking.
+Recommendation: submit the N1 fix now, and propose the rewrite separately (issue
+first, since it breaks an API) as the fix for N2, N7 and N8.
+
+The rewrite is prototyped on branch `prototype/ancillary-safe-slices` (one
+commit on top of the N1 branch; not meant to merge as is). It works on `&[u8]` /
+`&mut [u8]` with offsets. Header fields are read and written with
+`core::mem::offset_of!` and `from_ne_bytes` / `to_ne_bytes`. The walk follows
+the `libc` crate's Linux `CMSG_NXTHDR`, but stops instead of looping on a
+wrapping length.
+
+| | A: pointer fix (N1 branch) | B: slices, `encode` unchanged | C: slices, `encode(&mut [u8])` (prototype) |
+| --- | --- | --- | --- |
+| N1 overread | Fixed | Fixed | Fixed |
+| N2a to N2c aliasing | Not fixed; needs a separate pointer-based fix | Fixed: no raw pointers are kept | Fixed |
+| N7 `encode` can de-initialize | Not fixed | Not fixed: handing `&mut [u8]` to `encode` as `MaybeUninit` needs the same cast B1 condemns | Fixed: `encode` can only write initialized bytes |
+| N8 libc hang | Not fixed | Fixed | Fixed (`wrapping_len_terminates` test) |
+| `unsafe` in the parse/build core | 22 | About 6 (estimate, not built) | 5: two `CMSG_*` arithmetic calls, the `unsafe fn` marker on `AncillaryIter::new`, two `set_len` |
+| Public API | Unchanged | Unchanged | `AncillaryData::encode` takes `&mut [u8]`. Breaks every implementor: 5 in-tree impls, the bytemuck blanket impl, and downstream users |
+| Size | +47 / −11 in 2 files | Not built | +167 / −136 in 5 files |
+| Miri (SB and TB) | Clean on a hand-built message; the builder still hits N2 | Not run | Clean: N1+N2 test, `tests/ancillary.rs`, 390 random buffers |
+| Equivalence with libc | Uses libc's macros | Same as C | Identical level, type, length and payload range on 194,194 random buffers vs libc's `CMSG_FIRSTHDR`/`CMSG_NXTHDR` on Linux (2 skipped where libc hangs) |
+| Platform risk | None new | Same as C | The walk uses Linux rules everywhere. Apple's and Windows' macros skip the `cmsg_len < header` check (so they can loop), and musl stops one byte earlier. Windows is compile-checked only |
+
+Other notes on C:
+
+- `AncillaryIter::new` could become a safe `fn`, because the parser is
+  bounds-checked for any input. That is non-breaking, but leaves
+  `unused_unsafe` warnings at call sites such as compio-quic.
+- `CMSG_ALIGN` is derived as `CMSG_SPACE(1) - CMSG_SPACE(0)` and assumes
+  power-of-two rounding. That holds for Linux, Apple and Windows; the other
+  BSDs are unchecked.
+- `set_len` in `push` still relies on `IoBufMut` behaving, which is the 2a to
+  2e contract. The unsafe-review branch's `unsafe trait` restore covers it.
+- Performance was not measured. The field access goes through a small generic
+  helper that should inline.
 
 ## bytemuck vs zerocopy for compio
 
