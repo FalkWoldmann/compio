@@ -26,6 +26,33 @@ used by the existing review. UB claims were checked with Miri
 IDs `B1` to `B3` and `2a` to `2e` refer to `docs/soundness.md` on
 `claude/compio-unsafe-code-e3j5pw`.
 
+## Branches
+
+Every PR branch is linear on master 6d40918, one commit each (the trait branch
+is stacked on four of them), authored as Falk Woldmann Lu with no trailers and
+unsigned, ready to sign locally. Old tips are listed so nothing is lost.
+
+| Branch | Commit | Draft | Role | Old tip |
+| --- | --- | --- | --- | --- |
+| `fix/iour-recvmsg-out-parse` | 256694b | 8 | N4, non-breaking | e8777cf |
+| `fix/buffer-bounds-hardening` | 7aaff74 | 4 | 2a, 2c, non-breaking | b5e1553 |
+| `fix/buffer-pointer-stability` | 90afe0b | 5 | 2b, non-breaking | 89c00b8 |
+| `fix/bytesmut-as-uninit-provenance` | 3e4e078 | 6 | 2e, non-breaking | 7fd83d8 |
+| `fix/repeat-advance-past-capacity` | c9b61fa | 7 | B3, non-breaking | b247bcc |
+| `fix/buffer-trait-soundness` | 3484f52 | 9 | B1 (#1053) and the 2a to 2e root cause, breaking. Stacked on 4 to 7 | 8a2d7b5 |
+| `fix/ancillary-safe-rewrite` | 7d7b636 | 3 | N1, N2, N3, N7, N8, breaking | 6bf10f2 |
+| `fix/ancillary-decode-overread` | e4a5bb0 | none | N1 only. Fallback if the rewrite is rejected | 01c365f |
+
+Superseded, not used by any draft (candidates for deletion):
+
+- `prototype/ancillary-safe-slices`: replaced by `fix/ancillary-safe-rewrite`.
+- `claude/compio-unsafe-code-e3j5pw`, `docs/soundness`, `unsafe-review`,
+  `style/document-unsafe-blocks`, `ci/miri-compio-buf`: earlier stacks of the
+  buffer work on master 1f47110. All but `unsafe-review` still carry the old
+  pointer-stability hunk (N2c). `style/document-unsafe-blocks` and `ci/miri-compio-buf` hold work
+  not yet split out (safety comments, Miri CI); rebase them onto
+  `fix/buffer-trait-soundness` when that work is picked up.
+
 ## Consolidated findings
 
 Status is given for `master` (M) and for `claude/compio-unsafe-code-e3j5pw` (B).
@@ -105,10 +132,12 @@ Suggested upstream follow-ups:
 
 ### Fixing #1053: `unsafe fn` vs a safe write-only view
 
-The fix is `fix/buffer-trait-soundness` (8a2d7b5): `unsafe trait` markers on
-the five buffer traits, and `as_uninit`, `iter_uninit_slice` and `copy_within`
-as `unsafe fn`. Upstream it should go as two PRs (markers, then `unsafe fn`),
-since the merged branches in its history ship separately.
+The fix is `fix/buffer-trait-soundness`: `unsafe trait` markers on the five
+buffer traits, and `as_uninit`, `iter_uninit_slice` and `copy_within` as
+`unsafe fn`, in one commit because they are one semver event. It is stacked on
+the four non-breaking buffer fixes it builds on (see Branches). If the
+maintainers want the markers and the `unsafe fn` change reviewed separately,
+the commit splits along its two numbered parts.
 
 The issue's other option is a safe accessor that can only write initialized
 bytes, like `bytes::buf::UninitSlice` (or std's unstable `BorrowedCursor`).
@@ -133,7 +162,7 @@ If upstream wants a safe spare-capacity writer later, it can be added next to
 the `unsafe fn` without another break.
 
 Reproducers for the sibling routes, 2a to 2c, 2e, B3 and the ancillary findings
-are in `docs/reproducers` (verified against master c9bf270).
+are in `docs/reproducers` (verified against master 6d40918).
 
 ## Ship order
 
@@ -146,7 +175,7 @@ the maintainers turn the break down.
 
 compio's CONTRIBUTING asks for an issue before major changes.
 
-- **Comment on #1053** (B1). The preferred fix is the unsafe-review branch:
+- **Comment on #1053** (B1). The preferred fix is `fix/buffer-trait-soundness`:
   `as_uninit` and its siblings become `unsafe fn`, and `IoBuf` / `IoBufMut` /
   `SetLen` get back the `unsafe trait` markers that #220 added and #555
   dropped. Point out the siblings (`iter_uninit_slice`, `copy_within`), the
@@ -173,16 +202,16 @@ by the breaking changes. Any order.
 | N6: add the missing rustix feature | `compio-io` builds on its own | Not written (one line) |
 | Miri CI for `compio-buf`, split out of `ci/miri-compio-buf` | Regression coverage | Not built: today it's stacked on the breaking commit |
 
-All branches are one commit behind master and need a rebase before opening.
+All branches are one commit each on master 6d40918, with no merge commits.
 
 ### 3. When accepted: one breaking release (compio-io 0.11)
 
 - `fix/buffer-trait-soundness`: B1, and the 2a to 2e root cause via the
   `unsafe trait` markers.
 - `fix/ancillary-safe-rewrite` (one commit on master): N1, N2a to N2c, N3,
-  N7, N8, and a safe `AncillaryIter::new`. If the trait branch lands first,
-  rebase onto it; that branch still carries the old N2c hunk through its merge
-  of `fix/buffer-pointer-stability`, and the rewrite replaces that code.
+  N7, N8, and a safe `AncillaryIter::new`. Independent of the trait branch:
+  it also applies cleanly on top of it, and the combination passes the
+  ancillary tests, so either can land first.
 - Miri CI job for `compio-io --features ancillary,bytemuck` (needs N6).
 
 ### 4. Only if the maintainers reject a break
@@ -293,7 +322,8 @@ Other notes on C:
   power-of-two rounding. That holds for Linux, Apple and Windows; the other
   BSDs are unchecked.
 - `set_len` in `push` still relies on `IoBufMut` behaving, which is the 2a to
-  2e contract. The unsafe-review branch's `unsafe trait` restore covers it.
+  2e contract. The `unsafe trait` restore on `fix/buffer-trait-soundness`
+  covers it.
 - Performance: see the next section.
 
 ### Performance and efficiency
@@ -375,7 +405,7 @@ one. The break comes from fixing N7, not from moving to slices: slices alone
   downloaded and searched (23 Sep 2026). One crate, comnoq, uses the API: it
   iterates, decodes, and uses `AncillaryData` as a bound. None implement
   `AncillaryData`. Private code and code pulled from git can't be checked.
-- **Semver:** a compio-io 0.11 bump. The unsafe-review branch's `unsafe trait`
+- **Semver:** a compio-io 0.11 bump. The `unsafe trait`
   changes need the same bump, so both could ship together.
 
 ### Does the rewrite fix N1 and N2?
@@ -388,7 +418,7 @@ commit:
 | N1 | Push one message, decode it from an exact-size allocation | UB | Clean |
 | N2a | Same test | UB (SB) | Clean |
 | N2b | Same test, plus three pushes and an overflowing fourth | UB (TB) | Clean |
-| N2c | Builder on a caller-owned `&mut [u8]` | Not on master (unsafe-review branch only) | Clean; the cached pointer no longer exists |
+| N2c | Builder on a caller-owned `&mut [u8]` | Not on master or any PR branch (only in the superseded stacks) | Clean; the cached pointer no longer exists |
 
 ## bytemuck vs zerocopy for compio
 

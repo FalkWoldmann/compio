@@ -4,11 +4,11 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 
-# compio master at c9bf270
+# compio master at 6d40918
 [dependencies]
-compio = { git = "https://github.com/compio-rs/compio", rev = "c9bf270", features = ["net", "macros"] }
-compio-buf = { git = "https://github.com/compio-rs/compio", rev = "c9bf270", features = ["bytes"] }
-compio-io = { git = "https://github.com/compio-rs/compio", rev = "c9bf270", features = ["ancillary", "bytemuck"] }
+compio = { git = "https://github.com/compio-rs/compio", rev = "6d40918", features = ["net", "macros"] }
+compio-buf = { git = "https://github.com/compio-rs/compio", rev = "6d40918", features = ["bytes"] }
+compio-io = { git = "https://github.com/compio-rs/compio", rev = "6d40918", features = ["ancillary", "bytemuck"] }
 bytemuck = "1"
 bytes = "1"
 futures-executor = "0.3"

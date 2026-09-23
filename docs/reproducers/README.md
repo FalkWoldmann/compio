@@ -1,6 +1,6 @@
 # Reproducers
 
-Against compio master at c9bf270. Each file in `examples/` is standalone and
+Against compio master at 6d40918. Each file in `examples/` is standalone and
 short enough to paste into a comment or a gist.
 
 Miri: `cargo +nightly miri run --example <name>`.

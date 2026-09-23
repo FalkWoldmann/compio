@@ -4,11 +4,12 @@ Drafts for compio-rs/compio. Review and rewrite them in your own words before
 posting. Branch names refer to FalkWoldmann/compio.
 
 Reproducers for everything below are in `docs/reproducers` (one standalone
-file each, verified against master c9bf270). Put them in a gist and replace the
+file each, verified against master 6d40918). Put them in a gist and replace the
 "(gist link)" placeholders.
 
 Order: post 1 and 2 first (each can link its draft PR). The PRs in 4 to 8 don't
-depend on either discussion and can go up right away.
+depend on either discussion and can go up right away. 3 and 9 wait for the
+answers to 2 and 1.
 
 ---
 
@@ -62,7 +63,8 @@ depend on either discussion and can go up right away.
 >    `IoVectoredBufMut` and `SetLen`, with the obligations written down.
 > 2. Make `as_uninit`, `iter_uninit_slice` and `copy_within` `unsafe fn`.
 >
-> I can send these as two separate PRs. Independently of that, I have
+> I have this ready as one PR, and can split the two parts if you prefer.
+> Independently of that, I have
 > non-breaking PRs ready for the three cases above (clamp in `as_mut_slice`,
 > saturating `reserve`, one call for pointer and length) plus a `BytesMut`
 > provenance bug that Miri found along the way, and a `Repeat::read` length bug
@@ -189,9 +191,6 @@ depend on either discussion and can go up right away.
 
 ## 5. PR: `fix/buffer-pointer-stability`
 
-Squash both commits before opening, and remove the `AncillaryBuilder` part from
-the commit message.
-
 **Title:** `fix(driver): take the control pointer and length from one call`
 
 > `RecvMsg::init_control` set `msg_control` from one `as_uninit()` call and
@@ -238,3 +237,30 @@ the commit message.
 > unchanged for well-formed buffers; an oversized `namelen` is truncated instead
 > of overflowing. `test_udp_recv_msg_multi` and
 > `test_udp_recv_msg_multi_truncated_datagram` cover this path.
+
+---
+
+## 9. PR: `fix/buffer-trait-soundness`
+
+Open after 4 to 7 are merged (it is stacked on them), or open as a draft and
+say so. Once they merge, only the last commit remains.
+
+**Title:** `fix(buf)!: make the buffer traits unsafe and their uninit accessors unsafe fn`
+
+> Fixes #1053.
+>
+> - `as_uninit`, `iter_uninit_slice` and `copy_within` are `unsafe fn`. The
+>   caller must not de-initialize bytes below `buf_len()`.
+> - `IoBuf`, `IoBufMut`, `IoVectoredBuf`, `IoVectoredBufMut` and `SetLen` are
+>   `unsafe trait` again (#220, removed in #555), with the obligations unsafe
+>   code relies on written down: stable pointer and length across calls, the
+>   initialized prefix inside the extent, idempotent vectored iteration.
+> - New safe `fill_from_slice` and `fill_bytes`, so filling a buffer needs no
+>   `unsafe`. Two call sites moved to them.
+> - Static assertions that the traits stay `unsafe`, and a contract test over
+>   every in-tree buffer type.
+>
+> **Breaking:** `impl IoBuf for T` becomes `unsafe impl`, and callers of the
+> three methods need `unsafe`. Code that only uses buffers is unaffected.
+>
+> Checked on Linux and with `--target x86_64-pc-windows-msvc`.
