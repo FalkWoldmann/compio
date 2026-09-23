@@ -179,6 +179,45 @@ hardening, then review debt.
 13. **D1:** a maintainer decision on `signal-hook-registry`: it removes 7 unsafe
     blocks, but `SIG_DFL` is no longer restored.
 
+## Safe alternatives from std and established crates
+
+Six findings have a ready-made safe replacement. The most useful is
+`io_uring::types::RecvMsgOut::parse`: it is already a dependency, it fixes N4,
+and it removes two `unsafe` blocks. No crate can parse a control-message buffer
+that compio fills through io_uring or IOCP, so N1, N2 and G3 need a safe rewrite
+using std. Every API below was checked against the version in `Cargo.lock` or
+the std source for `nightly-2026-09-15`.
+
+| Finding | Safe alternative | Source | Status | Effect |
+| --- | --- | --- | --- | --- |
+| N4, plus the `read_unaligned` header reads in `iour.rs:652-704` | `io_uring::types::RecvMsgOut::parse(buffer, &msghdr)` | `io-uring` 0.7.15, already a dependency | Stable | Checks the buffer length and clamps the name, control and payload lengths to the allocation. `name_data()`, `control_data()`, `payload_data()` and `is_name_data_truncated()` replace compio's own offset arithmetic |
+| N3, bitwise types | `bytemuck::bytes_of` with `write_copy_of_slice`; `bytemuck::pod_read_unaligned` | bytemuck (already a dependency); std | Stable (`write_copy_of_slice` since 1.93) | Prototyped: `tests/ancillary.rs` passes 3/3 with no `unsafe` |
+| N3, libc and Windows pktinfo types | `to_ne_bytes` / `from_ne_bytes` per field | std | Stable | No crate needed. Only the Windows union reads stay `unsafe` |
+| B1 | A write-only view modelled on `bytes::buf::UninitSlice` | bytes 1.12 (optional dependency) | Stable | `UninitSlice` allows writes but no reads and no uninit writes, so it can't de-initialize. Building one from `&mut [u8]` or `&mut [MaybeUninit<u8>]` is safe. This is the safe version of #1053's second option |
+| 2e | `BytesMut::spare_capacity_mut` | bytes | Stable | Already used on the branch |
+| B3 | `<[MaybeUninit<u8>]>::write_filled` | std | Unstable (`maybe_uninit_fill`) | Keep the branch's `fill_bytes` until it stabilizes |
+| D1 | `signal-hook-registry` | crate | Stable | Prototyped. Stops restoring `SIG_DFL` |
+
+### Precedent, not a replacement
+
+- **2a to 2e:** no crate removes these, but established designs back the
+  branch's fix. `bytes::BufMut` is a `pub unsafe trait` for the same reason.
+  std's `BorrowedBuf` tracks the initialized range and makes raw access
+  `unsafe`, but it is unstable (`core_io_borrowed_buf`) and already behind
+  compio's `read_buf` feature.
+
+### No safe alternative exists
+
+| Finding | Why nothing fits | Recommended safe approach |
+| --- | --- | --- |
+| N1, N2, G3: control-message parsing and building | `rustix` models only `SCM_RIGHTS`, `SCM_CREDENTIALS` and `TxTime`. `nix` 0.31 covers everything compio-quic uses (`Ipv4Tos`, `Ipv6TClass`, packet info, `UdpGroSegments`, `UdpGsoSegments`), but its `CmsgIterator` only comes from nix's own blocking `recvmsg` and it is Unix only. `quinn-udp`'s cmsg module is private. std's `SocketAncillary` is unstable and limited to Unix domain sockets | Work on `&[u8]` / `&mut [u8]`. Get offsets from `CMSG_LEN`/`CMSG_SPACE` (`const fn` in libc) and `core::mem::offset_of!(cmsghdr, cmsg_len)` (stable since 1.77). Read and write fields with `from_ne_bytes` / `to_ne_bytes` on bounds-checked subslices. That rules out N1 and N2 by construction, needs no raw pointers, and lets `AncillaryIter::new` become safe. Or use zerocopy `Ref::from_prefix` over a local `cmsghdr` mirror for typed headers |
+| N5 (`copy_addr_from`) and the IOCP `transmute` | `socket2::SockAddr::new(storage, len)` is itself `unsafe`, and no crate converts safely between rustix, socket2 and windows-sys address types for every family | For IP addresses only, `SocketAddrAny` → `std::net::SocketAddr` → `SockAddr::from` is safe but loses Unix-domain sockets. Otherwise keep the copy and clamp the length |
+| `MmapMut::as_uninit` | std deliberately has no safe `&mut [u8]` → `&mut [MaybeUninit<u8>]` conversion | Covered by the B1 fix |
+| N6 | A rustix feature-gating bug, not an `unsafe` problem | Add the missing rustix feature |
+
+Suggested next step: switch `iour.rs` to `RecvMsgOut::parse` as a P2 change. It
+is small and self-contained, and it closes N4.
+
 ## bytemuck vs zerocopy for compio
 
 ### Where each could apply
