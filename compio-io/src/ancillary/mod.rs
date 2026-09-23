@@ -100,6 +100,7 @@ impl<'a> AncillaryIter<'a> {
 impl<'a> Iterator for AncillaryIter<'a> {
     type Item = AncillaryRef<'a>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         self.inner.next().map(AncillaryRef)
     }
@@ -136,12 +137,20 @@ impl<'a, B: IoBufMut + ?Sized> AncillaryBuilder<'a, B> {
         value: &T,
     ) -> Result<(), CodecError> {
         let offset = self.offset.ok_or(CodecError::BufferTooSmall)?;
-        let buf = self.buffer.ensure_init();
-        let end = sys::write_message(buf, offset, level, ty, value)?;
-        self.offset = sys::after(buf, end);
-        // SAFETY: `ensure_init` initialized the whole buffer, and
-        // `write_message` checked `end <= buf.len()`.
+        let cap = self.buffer.buf_capacity();
+        let end = offset
+            .checked_add(sys::cmsg_space(T::SIZE))
+            .filter(|&end| end <= cap)
+            .ok_or(CodecError::BufferTooSmall)?;
+        // SAFETY: `new` zero-initialized the whole buffer, and only this
+        // builder, which holds `&mut B`, has written to it since.
         unsafe { self.buffer.set_len(end) };
+        if let Err(e) = sys::write_message(self.buffer.as_mut_slice(), offset, level, ty, value) {
+            // SAFETY: shrinking back to bytes that were already initialized.
+            unsafe { self.buffer.set_len(offset) };
+            return Err(e);
+        }
+        self.offset = sys::after(cap, end);
         Ok(())
     }
 }

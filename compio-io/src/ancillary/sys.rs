@@ -82,6 +82,7 @@ pub use windows_macros::CMSG_SPACE;
 const HDR: usize = size_of::<cmsghdr>();
 
 /// `CMSG_SPACE(len)`: header plus `len` payload bytes, padded for alignment.
+#[inline]
 pub(crate) fn cmsg_space(len: usize) -> usize {
     // SAFETY: `CMSG_SPACE` only does integer arithmetic on its argument.
     #[allow(clippy::unnecessary_cast)]
@@ -91,6 +92,7 @@ pub(crate) fn cmsg_space(len: usize) -> usize {
 }
 
 /// `CMSG_LEN(len)`: the `cmsg_len` of a message with `len` payload bytes.
+#[inline]
 fn cmsg_len(len: usize) -> usize {
     // SAFETY: `CMSG_LEN` only does integer arithmetic on its argument.
     #[allow(clippy::unnecessary_cast)]
@@ -102,6 +104,7 @@ fn cmsg_len(len: usize) -> usize {
 /// `CMSG_ALIGN(len)`: `len` rounded up to the platform's control message
 /// alignment, derived from `CMSG_SPACE` so it matches the platform. `None` on
 /// overflow.
+#[inline]
 fn cmsg_align(len: usize) -> Option<usize> {
     let unit = cmsg_space(1) - cmsg_space(0);
     len.checked_next_multiple_of(unit)
@@ -119,6 +122,7 @@ macro_rules! field {
     }};
 }
 
+#[inline]
 fn get(header: &[u8], (offset, size): (usize, usize)) -> u64 {
     let bytes = &header[offset..offset + size];
     match size {
@@ -128,6 +132,7 @@ fn get(header: &[u8], (offset, size): (usize, usize)) -> u64 {
     }
 }
 
+#[inline]
 fn set(header: &mut [u8], (offset, size): (usize, usize), value: u64) {
     let bytes = &mut header[offset..offset + size];
     match size {
@@ -147,6 +152,7 @@ pub(crate) fn check_buffer(buf: &[u8]) {
 }
 
 /// Offset of the first header, like `CMSG_FIRSTHDR`.
+#[inline]
 pub(crate) fn first(buf: &[u8]) -> Option<usize> {
     (buf.len() >= HDR).then_some(0)
 }
@@ -154,6 +160,7 @@ pub(crate) fn first(buf: &[u8]) -> Option<usize> {
 /// Offset of the header after the one at `offset`, following the `libc`
 /// crate's Linux `CMSG_NXTHDR`: `None` if the current `cmsg_len` is shorter
 /// than a header, or if a whole header does not fit after it.
+#[inline]
 fn next(buf: &[u8], offset: usize) -> Option<usize> {
     let len = get(&buf[offset..offset + HDR], field!(cmsg_len));
     let len = usize::try_from(len).ok().filter(|&len| len >= HDR)?;
@@ -204,6 +211,7 @@ impl<'a> CMsgIter<'a> {
 impl<'a> Iterator for CMsgIter<'a> {
     type Item = CMsgRef<'a>;
 
+    #[inline]
     fn next(&mut self) -> Option<CMsgRef<'a>> {
         let buf = self.buf;
         let offset = self.offset?;
@@ -224,6 +232,7 @@ impl<'a> Iterator for CMsgIter<'a> {
 }
 
 /// Writes one message at `offset` and returns the offset just past it.
+#[inline]
 pub(crate) fn write_message<T: AncillaryData>(
     buf: &mut [u8],
     offset: usize,
@@ -245,8 +254,9 @@ pub(crate) fn write_message<T: AncillaryData>(
 }
 
 /// Offset for the next message after one ending at `end`, if a header fits.
-pub(crate) fn after(buf: &[u8], end: usize) -> Option<usize> {
-    (end.checked_add(HDR)? <= buf.len()).then_some(end)
+#[inline]
+pub(crate) fn after(cap: usize, end: usize) -> Option<usize> {
+    (end.checked_add(HDR)? <= cap).then_some(end)
 }
 
 #[cfg(unix)]
