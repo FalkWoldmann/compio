@@ -147,13 +147,11 @@ All branches are one commit behind master and need a rebase before opening.
 
 - `fix/buffer-trait-soundness`: B1, and the 2a to 2e root cause via the
   `unsafe trait` markers.
-- The ancillary rewrite from `prototype/ancillary-safe-slices`: N1, N2a to
-  N2c, N7, N8. Rebase onto the trait branch; that branch still carries the old
-  N2c hunk through its merge of `fix/buffer-pointer-stability`, and the rewrite
-  replaces that code anyway.
+- `fix/ancillary-safe-rewrite` (one commit on master): N1, N2a to N2c, N3,
+  N7, N8, and a safe `AncillaryIter::new`. If the trait branch lands first,
+  rebase onto it; that branch still carries the old N2c hunk through its merge
+  of `fix/buffer-pointer-stability`, and the rewrite replaces that code.
 - Miri CI job for `compio-io --features ancillary,bytemuck` (needs N6).
-- Optional, same release: make `AncillaryIter::new` a safe `fn`.
-- Right after (touches the same `encode` impls): N3, the safe copy helpers.
 
 ### 4. Only if the maintainers reject a break
 
@@ -223,8 +221,19 @@ Recommendation: propose the rewrite, including the `encode` break, as the fix fo
 N1, N2, N7 and N8 (issue first). Hold the pointer fix back as a fallback if the
 break is rejected, since the rewrite would replace it.
 
-The rewrite is prototyped on branch `prototype/ancillary-safe-slices` (one
-commit on top of the N1 branch; not meant to merge as is). It works on `&[u8]` /
+**Update:** the rewrite is now `fix/ancillary-safe-rewrite`, one commit on
+master and PR-ready. It replaces the prototype's `offset_of!` / `from_ne_bytes`
+field access with a `#[repr(C)]` mirror of `cmsghdr` that derives
+`bytemuck::Pod`, checked against libc by `const` asserts. The builder grows the
+buffer with `extend_from_slice` and rolls back with a new safe
+`SetLenExt::truncate`, so the module's only `unsafe` left is a compile-time
+`CMSG_SPACE` constant and two Windows union reads. It also fixes N3. The
+figures below are for the earlier prototype (`prototype/ancillary-safe-slices`):
+the reworked builder is slower than master (about 30 ns vs 20 ns for three
+messages) because it goes through compio-buf's safe methods, while parsing is
+unchanged.
+
+The prototype was one commit on top of the N1 branch. It works on `&[u8]` /
 `&mut [u8]` with offsets. Header fields are read and written with
 `core::mem::offset_of!` and `from_ne_bytes` / `to_ne_bytes`. The walk follows
 the `libc` crate's Linux `CMSG_NXTHDR`, but stops instead of looping on a
