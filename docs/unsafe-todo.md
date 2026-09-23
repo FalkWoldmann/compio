@@ -223,8 +223,9 @@ is small and self-contained, and it closes N4.
 ## N1 and N2: pointer fix vs safe slice rewrite
 
 The safe rewrite fixes N1, N2a to N2c, N7 and N8 by construction, and takes the
-ancillary core from 22 `unsafe` keywords to 5. The cost is a breaking change to
-`AncillaryData::encode` and about 300 changed lines. The pointer fix on
+ancillary core from 22 `unsafe` keywords to 6, and after tuning it is faster
+than both master and the pointer fix. The cost is a breaking change to
+`AncillaryData::encode` and about 330 changed lines. The pointer fix on
 `fix/ancillary-decode-overread` fixes only N1, but it is small and non-breaking.
 Recommendation: submit the N1 fix now, and propose the rewrite separately (issue
 first, since it breaks an API) as the fix for N2, N7 and N8.
@@ -242,9 +243,9 @@ wrapping length.
 | N2a to N2c aliasing | Not fixed; needs a separate pointer-based fix | Fixed: no raw pointers are kept | Fixed |
 | N7 `encode` can de-initialize | Not fixed | Not fixed: handing `&mut [u8]` to `encode` as `MaybeUninit` needs the same cast B1 condemns | Fixed: `encode` can only write initialized bytes |
 | N8 libc hang | Not fixed | Fixed | Fixed (`wrapping_len_terminates` test) |
-| `unsafe` in the parse/build core | 22 | About 6 (estimate, not built) | 5: two `CMSG_*` arithmetic calls, the `unsafe fn` marker on `AncillaryIter::new`, two `set_len` |
+| `unsafe` in the parse/build core | 22 | About 6 (estimate, not built) | 6: two `CMSG_*` arithmetic calls, the `unsafe fn` marker on `AncillaryIter::new`, three `set_len` |
 | Public API | Unchanged | Unchanged | `AncillaryData::encode` takes `&mut [u8]`. Breaks every implementor: 5 in-tree impls, the bytemuck blanket impl, and downstream users |
-| Size | +47 / −11 in 2 files | Not built | +167 / −136 in 5 files |
+| Size | +47 / −11 in 2 files | Not built | +187 / −139 in 4 files |
 | Miri (SB and TB) | Clean on a hand-built message; the builder still hits N2 | Not run | Clean: N1+N2 test, `tests/ancillary.rs`, 390 random buffers |
 | Equivalence with libc | Uses libc's macros | Same as C | Identical level, type, length and payload range on 194,194 random buffers vs libc's `CMSG_FIRSTHDR`/`CMSG_NXTHDR` on Linux (2 skipped where libc hangs) |
 | Platform risk | None new | Same as C | The walk uses Linux rules everywhere. Apple's and Windows' macros skip the `cmsg_len < header` check (so they can loop), and musl stops one byte earlier. Windows is compile-checked only |
@@ -259,8 +260,64 @@ Other notes on C:
   BSDs are unchecked.
 - `set_len` in `push` still relies on `IoBufMut` behaving, which is the 2a to
   2e contract. The unsafe-review branch's `unsafe trait` restore covers it.
-- Performance was not measured. The field access goes through a small generic
-  helper that should inline.
+- Performance: see the next section.
+
+### Performance and efficiency
+
+After two small tuning changes, the safe rewrite is faster than both master and
+the pointer fix: about 2× on building and about 25% on parsing. Building runs
+3× fewer instructions. Parsing runs about as many instructions as master and
+slightly more on the bare walk, but finishes sooner. Per datagram this is a few
+nanoseconds against a `recvmsg` that costs microseconds, so neither version
+matters for end-to-end throughput.
+
+**Workload.** What compio-quic does per datagram: a 128-byte `AncillaryBuf`
+holding three messages (`IP_TOS` u8, `IP_PKTINFO` `in_pktinfo`, `UDP_GRO` i32).
+*build* creates the buffer and pushes the three messages; *parse* iterates and
+decodes each by level and type; *walk* iterates and only reads each `len()`.
+Release build, 5M iterations × 7 runs per round, 3 interleaved rounds, on a
+4-core 2.8 GHz Xeon container.
+
+| | master | Pointer fix (N1 branch, `#[inline]` added) | Safe rewrite (tuned) |
+| --- | --- | --- | --- |
+| build, wall-clock | 18.9 ns | 20.8 ns | **9.5 ns** |
+| parse, wall-clock | 17.3 ns | 19.0 ns | **13.7 ns** |
+| walk, wall-clock | 10.5 ns | 12.3 ns | **9.9 ns** |
+| build, instructions/op | 204 | 205 | **70** |
+| parse, instructions/op | **174** | 212 | 193 |
+| walk, instructions/op | **131** | 137 | 149 |
+| Code size of `parse` in the benchmark | 368 B (+ 90 B `next`, not inlined) | 446 B | 577 B |
+
+Wall-clock values are the median of each round's median. Instruction counts are
+exact: callgrind, taking the difference between 20k and 40k iterations so setup
+cost cancels.
+
+**The first cut was 2× slower.** Before tuning, the safe version took 37 ns to
+build and 40 ns to parse. Profiling found two prototype mistakes, neither caused
+by the bounds checks:
+
+1. `push` called `ensure_init()` on every message, which zero-fills the whole
+   unused tail of the buffer, about 300 bytes of redundant memset per build. Now
+   `new()` zeroes it once, and `push` advances the length and writes through
+   `as_mut_slice`, shrinking back if `encode` fails. This adds one `unsafe`
+   (`set_len`) that relies on the same buffer-honesty contract as before.
+2. `CMsgIter::next` wasn't inlined into `AncillaryIter::next`, so every message
+   paid a call and a 32-byte return through memory. `#[inline]` on the iterator
+   and the header helpers fixes it. For fairness, the pointer fix got the same
+   `#[inline]`.
+
+**Why the safe version is faster.** The old code builds a `msghdr` for every
+`CMSG_FIRSTHDR`/`CMSG_NXTHDR` call and derives pointers through it. The safe
+version does plain offset arithmetic, which LLVM compiles to branch-light code
+with conditional moves. Its bounds checks cost a few instructions per message,
+but they don't sit on a dependency chain. The pointer fix is slightly slower
+than master because computing the clamped payload length adds work that master
+skips by being wrong.
+
+**Caveats.** This is a microbenchmark in a shared container: wall-clock noise is
+a few percent, and the instruction counts are the more reliable signal. Only
+x86-64 Linux was measured. The tuning is committed on
+`prototype/ancillary-safe-slices`; the benchmark harness isn't.
 
 ## bytemuck vs zerocopy for compio
 
