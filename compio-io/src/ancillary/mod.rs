@@ -83,17 +83,19 @@ pub struct AncillaryIter<'a> {
 impl<'a> AncillaryIter<'a> {
     /// Create [`AncillaryIter`] with the given buffer.
     ///
+    /// A buffer shorter than a control message header, such as the empty
+    /// control data of a datagram that carried none, yields no messages.
+    ///
     /// # Panics
     ///
-    /// This function will panic if the buffer is too short or not properly
-    /// aligned.
+    /// This function will panic if the buffer is not properly aligned.
     ///
     /// # Safety
     ///
     /// The buffer should contain valid control messages.
     pub unsafe fn new(buffer: &'a [u8]) -> Self {
         Self {
-            inner: sys::CMsgIter::new(buffer.as_ptr(), buffer.len()),
+            inner: sys::CMsgIter::parse(buffer.as_ptr(), buffer.len()),
             buffer,
         }
     }

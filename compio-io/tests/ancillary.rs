@@ -98,3 +98,12 @@ fn test_custom_buffer_cmsg() {
 fn invalid_buffer_length() {
     AncillaryBuf::<1>::new().builder();
 }
+
+#[test]
+fn empty_control_data_has_no_messages() {
+    assert_eq!(unsafe { AncillaryIter::new(&[]) }.count(), 0);
+
+    // What `recv_msg` hands back for a datagram without control data.
+    let buf = AncillaryBuf::<64>::new();
+    assert_eq!(unsafe { AncillaryIter::new(&buf) }.count(), 0);
+}

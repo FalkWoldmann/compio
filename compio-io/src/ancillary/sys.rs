@@ -137,6 +137,16 @@ pub(crate) struct CMsgIter {
 impl CMsgIter {
     pub(crate) fn new(ptr: *const u8, len: usize) -> Self {
         assert!(len >= unsafe { CMSG_SPACE(0) as _ }, "buffer too short");
+        Self::parse(ptr, len)
+    }
+
+    /// Like [`CMsgIter::new`], but a buffer too short for a header holds no
+    /// messages instead of panicking. `recvmsg` returns such a buffer when a
+    /// datagram carries no control data.
+    pub(crate) fn parse(ptr: *const u8, len: usize) -> Self {
+        if len < size_of::<cmsghdr>() {
+            return Self { len, offset: None };
+        }
         assert!(ptr.cast::<cmsghdr>().is_aligned(), "misaligned buffer");
 
         let msg = msghdr_from_raw(ptr.cast_mut(), len);
