@@ -820,6 +820,20 @@ pub trait SetLenExt: SetLen {
         // SAFETY: setting length to 0 is always valid
         unsafe { self.set_len(0) };
     }
+
+    /// Shorten the buffer to `len` bytes, like [`Vec::truncate`]. If `len` is
+    /// not less than the current length, this has no effect.
+    fn truncate(&mut self, len: usize)
+    where
+        Self: IoBuf,
+    {
+        if len < (*self).buf_len() {
+            // SAFETY: this only shrinks. Every byte below `len` is below the
+            // current length and so already initialized, and `len` is below
+            // the current length, which is within the capacity.
+            unsafe { self.set_len(len) };
+        }
+    }
 }
 
 impl<B: SetLen + ?Sized> SetLenExt for B {}

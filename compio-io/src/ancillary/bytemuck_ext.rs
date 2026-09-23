@@ -3,11 +3,9 @@
 //!
 //! See [`BitwiseAncillaryData`] for details.
 
-use std::mem::MaybeUninit;
-
 pub use bytemuck::{Pod, Zeroable};
 
-use super::{AncillaryData, CodecError, copy_from_bytes, copy_to_bytes};
+use super::{AncillaryData, CodecError};
 
 /// Marker trait to enable automatic `AncillaryData` implementation via
 /// bytemuck.
@@ -36,12 +34,20 @@ use super::{AncillaryData, CodecError, copy_from_bytes, copy_to_bytes};
 pub trait BitwiseAncillaryData: Pod {}
 
 impl<T: BitwiseAncillaryData> AncillaryData for T {
-    fn encode(&self, buffer: &mut [MaybeUninit<u8>]) -> Result<(), CodecError> {
-        unsafe { copy_to_bytes(self, buffer) }
+    fn encode(&self, buffer: &mut [u8]) -> Result<(), CodecError> {
+        let bytes = bytemuck::bytes_of(self);
+        buffer
+            .get_mut(..bytes.len())
+            .ok_or(CodecError::BufferTooSmall)?
+            .copy_from_slice(bytes);
+        Ok(())
     }
 
     fn decode(buffer: &[u8]) -> Result<Self, CodecError> {
-        unsafe { copy_from_bytes(buffer) }
+        let bytes = buffer
+            .get(..size_of::<Self>())
+            .ok_or(CodecError::BufferTooSmall)?;
+        Ok(bytemuck::pod_read_unaligned(bytes))
     }
 }
 

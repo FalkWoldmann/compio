@@ -33,10 +33,9 @@
 use std::{
     mem::MaybeUninit,
     ops::{Deref, DerefMut},
-    ptr,
 };
 
-use compio_buf::{IoBuf, IoBufMut, IoBufMutExt, SetLen, SetLenExt};
+use compio_buf::{IoBuf, IoBufExt, IoBufMut, IoBufMutExt, SetLen, SetLenExt};
 
 mod io;
 
@@ -76,25 +75,22 @@ impl AncillaryRef<'_> {
 
 /// An iterator for ancillary (control) messages.
 pub struct AncillaryIter<'a> {
-    inner: sys::CMsgIter,
-    buffer: &'a [u8],
+    inner: sys::CMsgIter<'a>,
 }
 
 impl<'a> AncillaryIter<'a> {
     /// Create [`AncillaryIter`] with the given buffer.
     ///
+    /// Any bytes are accepted: a malformed message yields a shorter payload or
+    /// ends the iteration, and is never read past the end of `buffer`.
+    ///
     /// # Panics
     ///
     /// This function will panic if the buffer is too short or not properly
     /// aligned.
-    ///
-    /// # Safety
-    ///
-    /// The buffer should contain valid control messages.
-    pub unsafe fn new(buffer: &'a [u8]) -> Self {
+    pub fn new(buffer: &'a [u8]) -> Self {
         Self {
-            inner: sys::CMsgIter::new(buffer.as_ptr(), buffer.len()),
-            buffer,
+            inner: sys::CMsgIter::new(buffer),
         }
     }
 }
@@ -102,18 +98,17 @@ impl<'a> AncillaryIter<'a> {
 impl<'a> Iterator for AncillaryIter<'a> {
     type Item = AncillaryRef<'a>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
-        unsafe {
-            let cmsg = self.inner.current(self.buffer.as_ptr());
-            self.inner.next(self.buffer.as_ptr());
-            cmsg.map(AncillaryRef)
-        }
+        self.inner.next().map(AncillaryRef)
     }
 }
 
 /// Helper to construct ancillary (control) messages.
 pub struct AncillaryBuilder<'a, B: ?Sized> {
-    inner: sys::CMsgIter,
+    /// Where the next message goes. For growable buffers this is also the
+    /// buffer's length; a plain `[u8]` keeps its full length throughout.
+    offset: usize,
     buffer: &'a mut B,
 }
 
@@ -126,38 +121,51 @@ impl<'a, B: IoBufMut + ?Sized> AncillaryBuilder<'a, B> {
     /// This function will panic if the buffer is too short or not properly
     /// aligned.
     pub fn new(buffer: &'a mut B) -> Self {
-        // SAFETY: always safe to make it empty.
-        unsafe { buffer.set_len(0) };
-        let slice = buffer.ensure_init();
-        let inner = sys::CMsgIter::new(slice.as_ptr(), slice.len());
-        Self { inner, buffer }
+        buffer.clear();
+        sys::check_buffer(buffer.buf_mut_ptr().cast(), buffer.buf_capacity());
+        Self { offset: 0, buffer }
     }
 
     /// Append a control message into the buffer.
+    ///
+    /// On error the buffer's length is left as it was before the call.
     pub fn push<T: AncillaryData>(
         &mut self,
         level: i32,
         ty: i32,
         value: &T,
     ) -> Result<(), CodecError> {
-        if !self.inner.is_space_enough(T::SIZE) {
-            return Err(CodecError::BufferTooSmall);
+        let offset = self.offset;
+        let end = offset
+            .checked_add(const { sys::cmsg_space(T::SIZE) })
+            .filter(|&end| end <= self.buffer.buf_capacity())
+            .ok_or(CodecError::BufferTooSmall)?;
+        let len = (*self.buffer).buf_len();
+        let result = grow_to(self.buffer, end).and_then(|()| {
+            let msg = &mut self.buffer.as_mut_slice()[offset..end];
+            msg.fill(0);
+            sys::write_message(msg, level, ty, value)
+        });
+        match result {
+            Ok(()) => self.offset = end,
+            Err(_) => self.buffer.truncate(len),
         }
-
-        // SAFETY: method `new` guarantees the buffer is zeroed and properly
-        // aligned, and we have checked the space.
-        let mut cmsg = unsafe { self.inner.current_mut(self.buffer.buf_mut_ptr().cast()) }
-            .expect("sufficient space");
-        cmsg.set_level(level);
-        cmsg.set_ty(ty);
-        unsafe {
-            self.buffer.advance(cmsg.encode_data(value)?);
-        }
-
-        unsafe { self.inner.next(self.buffer.buf_mut_ptr().cast()) };
-
-        Ok(())
+        result
     }
+}
+
+/// Grows the buffer's length to at least `len` with zero bytes, through its
+/// safe `extend_from_slice`. A buffer that is already long enough, such as a
+/// plain `[u8]`, is left alone.
+fn grow_to<B: IoBufMut + ?Sized>(buffer: &mut B, len: usize) -> Result<(), CodecError> {
+    const ZEROS: [u8; 64] = [0; 64];
+    while (*buffer).buf_len() < len {
+        let chunk = (len - (*buffer).buf_len()).min(ZEROS.len());
+        buffer
+            .extend_from_slice(&ZEROS[..chunk])
+            .map_err(|_| CodecError::BufferTooSmall)?;
+    }
+    Ok(())
 }
 
 /// A fixed-size, stack-allocated buffer for ancillary (control) messages.
@@ -181,8 +189,8 @@ impl<const N: usize> AncillaryBuf<N> {
         }
     }
 
-    /// Create [`AncillaryBuilder`] with this buffer. The buffer will be zeroed
-    /// on creation.
+    /// Create [`AncillaryBuilder`] with this buffer. The buffer will be
+    /// cleared on creation.
     ///
     /// # Panics
     ///
@@ -238,11 +246,7 @@ impl<const N: usize> DerefMut for AncillaryBuf<N> {
 /// Unix or `WSA_CMSG_SPACE(T::SIZE)` on Windows, and can be used as a const
 /// generic argument for [`AncillaryBuf`].
 pub const fn ancillary_space<T: AncillaryData>() -> usize {
-    // SAFETY: CMSG_SPACE is always safe
-    #[allow(clippy::unnecessary_cast)]
-    unsafe {
-        sys::CMSG_SPACE(T::SIZE as _) as usize
-    }
+    sys::cmsg_space(T::SIZE)
 }
 
 /// Error that can occur when encoding or decoding ancillary data.
@@ -327,8 +331,6 @@ impl std::error::Error for CodecError {
 /// # Example
 ///
 /// ```
-/// use std::mem::MaybeUninit;
-///
 /// use compio_io::ancillary::{AncillaryData, CodecError};
 ///
 /// struct MyData {
@@ -338,14 +340,11 @@ impl std::error::Error for CodecError {
 /// impl AncillaryData for MyData {
 ///     const SIZE: usize = std::mem::size_of::<u32>();
 ///
-///     fn encode(&self, buffer: &mut [MaybeUninit<u8>]) -> Result<(), CodecError> {
-///         if buffer.len() < Self::SIZE {
-///             return Err(CodecError::BufferTooSmall);
-///         }
-///         let bytes = self.value.to_ne_bytes();
-///         for (i, &byte) in bytes.iter().enumerate() {
-///             buffer[i] = MaybeUninit::new(byte);
-///         }
+///     fn encode(&self, buffer: &mut [u8]) -> Result<(), CodecError> {
+///         buffer
+///             .get_mut(..Self::SIZE)
+///             .ok_or(CodecError::BufferTooSmall)?
+///             .copy_from_slice(&self.value.to_ne_bytes());
 ///         Ok(())
 ///     }
 ///
@@ -368,14 +367,15 @@ pub trait AncillaryData: Sized {
     /// for types with custom encoding.
     const SIZE: usize = std::mem::size_of::<Self>();
 
-    /// Encode this value into the provided buffer.
+    /// Encode this value into the provided buffer, which is at least
+    /// [`Self::SIZE`](AncillaryData::SIZE) bytes long.
     ///
     /// # Errors
     ///
     /// Returns [`CodecError::BufferTooSmall`] if the buffer is too small to
     /// hold the encoded data, or [`CodecError::Other`] for other encoding
     /// errors.
-    fn encode(&self, buffer: &mut [MaybeUninit<u8>]) -> Result<(), CodecError>;
+    fn encode(&self, buffer: &mut [u8]) -> Result<(), CodecError>;
 
     /// Decode a value from the provided buffer.
     ///
@@ -384,25 +384,4 @@ pub trait AncillaryData: Sized {
     /// Returns [`CodecError::BufferTooSmall`] if the buffer is too small,
     /// or [`CodecError::Other`] for other decoding errors.
     fn decode(buffer: &[u8]) -> Result<Self, CodecError>;
-}
-
-unsafe fn copy_to_bytes<T: AncillaryData>(
-    src: &T,
-    dest: &mut [MaybeUninit<u8>],
-) -> Result<(), CodecError> {
-    if dest.len() < T::SIZE {
-        return Err(CodecError::BufferTooSmall);
-    }
-    unsafe {
-        ptr::copy_nonoverlapping::<u8>(src as *const T as _, dest.as_mut_ptr() as _, T::SIZE);
-    }
-    Ok(())
-}
-
-unsafe fn copy_from_bytes<T: AncillaryData>(src: &[u8]) -> Result<T, CodecError> {
-    if src.len() < T::SIZE {
-        return Err(CodecError::BufferTooSmall);
-    }
-    let src_ptr = src.as_ptr() as *const T;
-    unsafe { Ok(ptr::read_unaligned(src_ptr)) }
 }
