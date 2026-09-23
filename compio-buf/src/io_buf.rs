@@ -500,14 +500,36 @@ pub trait IoBufMutExt: IoBufMut {
     /// # Panics
     ///
     /// This method will panic if the source or destination range is out of
-    /// bounds.
+    /// bounds, or if the copy would move bytes from at or above
+    /// [`buf_len`](IoBufExt::buf_len) into `[0, buf_len())`. Those bytes may be
+    /// uninitialized, and the initialized prefix must stay initialized.
     ///
     /// [`slice::copy_within`]: https://doc.rust-lang.org/std/primitive.slice.html#method.copy_within
     fn copy_within<R>(&mut self, src: R, dest: usize)
     where
         R: RangeBounds<usize>,
     {
-        self.as_uninit().copy_within(src, dest);
+        use std::ops::Bound;
+
+        let init = (*self).buf_len();
+        let uninit = self.as_uninit();
+        let start = match src.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n.checked_add(1).expect("out of range"),
+            Bound::Unbounded => 0,
+        };
+        let end = match src.end_bound() {
+            Bound::Included(&n) => n.checked_add(1).expect("out of range"),
+            Bound::Excluded(&n) => n,
+            Bound::Unbounded => uninit.len(),
+        };
+        // Only a copy towards lower indices can carry a byte from at or above
+        // `init` to below it.
+        assert!(
+            !(start < end && dest < start && dest < init && end > init),
+            "copy_within would move bytes from at or above buf_len() into the initialized prefix"
+        );
+        uninit.copy_within(start..end, dest);
     }
 
     /// Returns an [`Uninit`], which is a [`Slice`] that only exposes
