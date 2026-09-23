@@ -21,6 +21,7 @@ thiserror = { workspace = true, optional = true }
 serde = { version = "1.0.219", optional = true }
 serde_json = { version = "1.0.140", optional = true }
 bytemuck = { workspace = true, optional = true, features = [
+    "derive",
     "min_const_generics",
 ] }
 
@@ -37,11 +38,15 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 serde = { version = "1.0.219", features = ["derive"] }
 futures-executor = { workspace = true }
 
+[target.'cfg(unix)'.dev-dependencies]
+libc = { workspace = true }
+
 [features]
 default = ["bytes"]
 compat = ["futures-util/io", "dep:pin-project-lite"]
 sync = []
-ancillary = ["dep:libc", "dep:rustix", "dep:windows-sys"]
+ancillary = ["dep:bytemuck", "dep:libc", "dep:rustix", "dep:windows-sys"]
+bytemuck = ["dep:bytemuck"]
 bytes = ["compio-buf/bytes"]
 
 # Codecs

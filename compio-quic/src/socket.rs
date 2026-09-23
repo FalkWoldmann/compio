@@ -291,8 +291,7 @@ impl Socket {
         let mut stride = len;
 
         let res = (|| {
-            // SAFETY: `control` contains valid data
-            for cmsg in unsafe { AncillaryIter::new(&control) } {
+            for cmsg in AncillaryIter::new(&control) {
                 #[cfg(windows)]
                 const UDP_COALESCED_INFO: i32 = WinSock::UDP_COALESCED_INFO as i32;
 

@@ -635,7 +635,7 @@ impl AsyncWriteAncillaryZerocopy for &UnixStream {
 /// assert_eq!(&payload[..], b"hello");
 ///
 /// // Parse the received ancillary messages.
-/// let mut iter = unsafe { AncillaryIter::new(&ctrl_recv[..ctrl_len]) };
+/// let mut iter = AncillaryIter::new(&ctrl_recv[..ctrl_len]);
 /// let msg = iter.next().unwrap();
 /// assert_eq!(msg.level(), libc::SOL_SOCKET);
 /// assert_eq!(msg.ty(), libc::SCM_RIGHTS);
