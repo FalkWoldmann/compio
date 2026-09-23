@@ -3,6 +3,10 @@
 Drafts for compio-rs/compio. Review and rewrite them in your own words before
 posting. Branch names refer to FalkWoldmann/compio.
 
+Reproducers for everything below are in `docs/reproducers` (one standalone
+file each, verified against master c9bf270). Put them in a gist and replace the
+"(gist link)" placeholders.
+
 Order: post 1 and 2 first (each can link its draft PR). The PRs in 4 to 8 don't
 depend on either discussion and can go up right away.
 
@@ -18,6 +22,19 @@ depend on either discussion and can go up right away.
 > `[u8; N]`, I reproduced it with `Vec<u8>` and `&mut [u8]`. `BytesMut`,
 > `ArrayVec`, `SmallVec` and `MmapMut` expose their full capacity the same way.
 >
+> ```rust
+> let mut bufs = [vec![1u8, 2, 3], vec![4u8, 5, 6]];
+> for slice in bufs.iter_uninit_slice() {
+>     slice[0] = MaybeUninit::uninit();
+> }
+> let x = bufs[0][0]; // Miri: reading uninitialized memory
+>
+> let mut v = Vec::with_capacity(8);
+> v.extend_from_slice(&[1u8, 2, 3, 4]);
+> v.copy_within(4..8, 0); // copies spare capacity over v[0..4]
+> let x = v[0]; // Miri: reading uninitialized memory
+> ```
+>
 > **Making `as_uninit` an `unsafe fn` is not enough on its own.** Unsafe code
 > also assumes that the safe methods of a user's `IoBuf` / `IoBufMut` agree with
 > each other:
@@ -31,6 +48,11 @@ depend on either discussion and can go up right away.
 > - `RecvMsg::init_control` takes `msg_control` and `msg_controllen` from two
 >   separate `as_uninit()` calls and hands them to `recvmsg`.
 >
+> Reproducers for all three: (gist link). The `recvmsg` one runs natively: a
+> control buffer whose `as_uninit` alternates between an 8-byte and a 256-byte
+> field makes the kernel write a 32-byte `IP_PKTINFO` message into the 8-byte
+> one and overwrite the bytes after it.
+>
 > #220 fixed this by making the traits `unsafe`, and #555 removed the markers
 > (its description planned an `unsafe fn buffer()` instead, which never landed).
 >
@@ -43,7 +65,8 @@ depend on either discussion and can go up right away.
 > I can send these as two separate PRs. Independently of that, I have
 > non-breaking PRs ready for the three cases above (clamp in `as_mut_slice`,
 > saturating `reserve`, one call for pointer and length) plus a `BytesMut`
-> provenance bug that Miri found along the way.
+> provenance bug that Miri found along the way, and a `Repeat::read` length bug
+> (reproducers in the same gist).
 >
 > Would you accept the breaking part?
 
@@ -63,11 +86,10 @@ depend on either discussion and can go up right away.
 >    tests pass.
 >
 >    ```rust
->    const N: usize = ancillary_space::<u32>();
->    let mut buf = AncillaryBuf::<N>::new();
->    buf.builder().push(1, 2, &7u32).unwrap();
->    // copy into an allocation of exactly N bytes, then:
->    let msg = unsafe { AncillaryIter::new(&exact) }.next().unwrap();
+>    // One u32 message, CMSG_SPACE(4) bytes (Linux glibc, 64-bit).
+>    let words: Box<[u64]> = Box::new([20, 1 | 2 << 32, 7]);
+>    let bytes: &[u8] = bytemuck::cast_slice(&words);
+>    let msg = unsafe { AncillaryIter::new(bytes) }.next().unwrap();
 >    msg.data::<u32>().unwrap(); // Miri: dangling reference (beyond the allocation)
 >    ```
 >
@@ -75,16 +97,25 @@ depend on either discussion and can go up right away.
 >    pointer derived from `&mut cmsghdr` (Stacked Borrows rejects this), and
 >    `self.buffer.advance(cmsg.encode_data(value)?)` writes through an older
 >    pointer after taking a new `&mut` borrow of the buffer (Tree Borrows rejects
->    this). Any `push` shows it.
+>    this). Any `push` shows it:
+>
+>    ```rust
+>    let mut buf = AncillaryBuf::<{ ancillary_space::<u32>() }>::new();
+>    buf.builder().push(1, 2, &7u32).unwrap();
+>    ```
 >
 > 3. **`encode` can de-initialize bytes.** `AncillaryData` is a safe trait, and
 >    `encode` gets `&mut [MaybeUninit<u8>]` over bytes that `push` then marks as
 >    initialized. A safe impl that writes `MaybeUninit::uninit()` makes a later
->    read of the buffer UB.
+>    read of the buffer UB (Miri needs `-Zmiri-disable-stacked-borrows` to get
+>    past 2 first).
 >
 > 4. **Hang.** libc's Linux `CMSG_NXTHDR` returns the same header again when
 >    `cmsg_len` is within 7 of `usize::MAX`, so the iterator never ends. Not UB,
->    but a corrupt buffer hangs the caller.
+>    but a corrupt buffer hangs the caller (debug builds abort on an overflow
+>    inside libc instead).
+>
+> Full reproducers: (gist link).
 >
 > **Proposed fix** (draft PR: link): parse and build on `&[u8]` / `&mut [u8]`
 > with offsets. Headers are copied in and out of a `#[repr(C)]` mirror of

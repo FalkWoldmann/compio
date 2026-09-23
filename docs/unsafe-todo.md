@@ -103,6 +103,38 @@ Suggested upstream follow-ups:
   above. See Ship order, step 1.
 - Open a new issue for B3 and 2e, or reference them in the PRs that fix them.
 
+### Fixing #1053: `unsafe fn` vs a safe write-only view
+
+The fix is `fix/buffer-trait-soundness` (8a2d7b5): `unsafe trait` markers on
+the five buffer traits, and `as_uninit`, `iter_uninit_slice` and `copy_within`
+as `unsafe fn`. Upstream it should go as two PRs (markers, then `unsafe fn`),
+since the merged branches in its history ship separately.
+
+The issue's other option is a safe accessor that can only write initialized
+bytes, like `bytes::buf::UninitSlice` (or std's unstable `BorrowedCursor`).
+
+| | `unsafe fn as_uninit` (branch) | Write-only view (`UninitSlice`-style) |
+| --- | --- | --- |
+| Fixes B1, `iter_uninit_slice` | Yes | Yes |
+| Fixes `copy_within` | Yes (`unsafe fn`) | Needs its own fix either way (a bounds check that keeps it safe works too) |
+| Fixes 2a to 2d | No, needs the `unsafe trait` markers | No, needs the same markers |
+| Implementors | `unsafe fn` in the impl, body unchanged | Return the view, `UninitSlice::uninit(&mut [MaybeUninit<u8>])` is safe |
+| Callers that write initialized bytes | `unsafe` block, or the safe `fill_bytes` / `fill_from_slice` the branch adds | Safe, but no `fill` / indexing: `write_byte` loops or `copy_from_slice` |
+| Callers that need `&mut [MaybeUninit<u8>]` (compio-fs Windows `BorrowedBuf::from`, compio-quic `poll_read_uninit`) | `unsafe` block, same as now | Still `unsafe` (`as_uninit_slice_mut`) |
+| Driver | Raw pointer, unchanged | Raw pointer, unchanged |
+| Public API | Signature change only | New type in the API: either `bytes` becomes a required public dependency of compio-buf, or compio-buf grows its own view type |
+| Break size | Every impl and ~30 call sites, mechanical | Same impls and call sites, not mechanical (slice code rewritten) |
+
+Recommendation: the branch. Both need the `unsafe trait` markers, so the view
+saves no `unsafe impl`. The places that touch `MaybeUninit` directly keep an
+`unsafe` block either way, and the callers that only write initialized bytes
+get the same safety from `fill_bytes` / `fill_from_slice` without a new type.
+If upstream wants a safe spare-capacity writer later, it can be added next to
+the `unsafe fn` without another break.
+
+Reproducers for the sibling routes, 2a to 2c, 2e, B3 and the ancillary findings
+are in `docs/reproducers` (verified against master c9bf270).
+
 ## Ship order
 
 Propose the breaking fixes first, since they are the preferred solution, and
