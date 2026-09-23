@@ -98,88 +98,80 @@ Suggested upstream follow-ups:
 
 - Comment on #1053: add the sibling methods, the other affected impls, and the
   point that the `unsafe trait` markers need restoring too (2a to 2d).
-- Open a new issue for N1 and N2 (ancillary UB in `compio-io`), using the Miri
-  test above.
+- Open a new issue for N1, N2, N7 and N8 (ancillary UB in `compio-io`),
+  proposing the slice rewrite with the `encode` break and using the Miri test
+  above. See Ship order, step 1.
 - Open a new issue for B3 and 2e, or reference them in the PRs that fix them.
 
-## Fix order
+## Ship order
 
-The order is: UB reachable from safe code first, then anything that would make
-landing the big branch unsafe, then CI that catches regressions, then
-hardening, then review debt.
+Propose the breaking fixes first, since they are the preferred solution, and
+meanwhile ship only fixes that stay after the break. Nothing gets built just to
+be replaced by the break. Non-breaking workarounds are a fallback, used only if
+the maintainers turn the break down.
 
-### P0: UB reachable from safe code
+### 1. Propose the break upstream (issues, no code)
 
-1. **N1: `decode_data` overread.** This is small and independent, so send it to
-   master as a standalone PR. Use `cmsg_len - CMSG_LEN(0)` as the payload length,
-   checked with `checked_sub` so a short `cmsg_len` is rejected, and clamp it to
-   the end of the buffer. Keep a slice of the whole buffer in `CMsgRef` so the
-   clamp has something to measure against. Add a Miri regression test that uses
-   an exact-size allocation.
-2. **N2a, N2b, N2c: `AncillaryBuilder` aliasing.** Fix this on
-   `claude/compio-unsafe-code-e3j5pw` *before* that branch lands, because its
-   2d fix makes it worse (N2c).
-   - Make `CMsgMut` wrap `*mut cmsghdr` instead of `&mut cmsghdr`, and write
-     the level, type, length and payload through raw pointers.
-   - Compute `encode_data` into a local before calling `self.buffer.advance(n)`.
-   - Don't cache `base` next to `&mut B`. Re-derive it on each `push` from one
-     `as_uninit()` call and `assert_eq!` it against the address and length
-     recorded in `new`. That keeps 2d's guarantee without holding a stale
-     pointer.
-   - Port the same change to master, or land it with the branch.
-3. **Land the buffer-trait work (B1, 2a to 2e, B3)** from
-   `claude/compio-unsafe-code-e3j5pw`, or through the split `fix/*` PRs. It is
-   breaking: `unsafe trait IoBuf`/`IoBufMut`/`SetLen`/…, and `unsafe fn
-   as_uninit`. Do step 2 first. This closes upstream #1053. The small `fix/*` branches
-   (`buffer-pointer-stability`, `buffer-bounds-hardening`,
-   `bytesmut-as-uninit-provenance`, `repeat-advance-past-capacity`) are not
-   breaking and can go ahead of `fix/buffer-trait-soundness`.
+compio's CONTRIBUTING asks for an issue before major changes.
 
-### P1: stop regressions
+- **Comment on #1053** (B1). The preferred fix is the unsafe-review branch:
+  `as_uninit` and its siblings become `unsafe fn`, and `IoBuf` / `IoBufMut` /
+  `SetLen` get back the `unsafe trait` markers that #220 added and #555
+  dropped. Point out the siblings (`iter_uninit_slice`, `copy_within`), the
+  other affected buffer types, and that the `unsafe fn` alone doesn't fix 2a
+  to 2d.
+- **Open an issue for the ancillary module** (N1, N2, N7, N8). Propose the
+  slice-based rewrite with `encode(&mut [u8])` as one breaking change. Include
+  the evidence: the Miri reproducers, no published crate implements
+  `AncillaryData` (125 dependents scanned), the migration is mechanical, and
+  it's faster than master.
 
-4. **N6: make `compio-io` build on its own.** Add the rustix feature that
-   compiles its `timespec` module (for example `fs` or `time`) to compio-io's
-   `ancillary` feature, or pin rustix at a version that doesn't need it.
-5. **Miri CI for `compio-io`.** Extend the `ci_test_buf` workflow from the
-   branch to `compio-io --features ancillary,bytemuck`, running both Stacked
-   and Tree Borrows. The existing `tests/ancillary.rs` already drives `push`,
-   so it hits N2 as soon as it runs under Miri. N1 needs the exact-size
-   allocation test above, because the existing test's buffer has slack after
-   the last message. Step 4 is needed first.
+### 2. Meanwhile: non-breaking fixes that stay after the break
 
-### P2: hardening and removing unsafe (see the next section)
+These fix real bugs, don't depend on the proposals, and are kept, not replaced,
+by the breaking changes. Any order.
 
-6. **N3: remove `copy_to_bytes`/`copy_from_bytes`.**
-   - For `BitwiseAncillaryData`, use `bytemuck::bytes_of` with
-     `write_copy_of_slice` to encode, and `bytemuck::pod_read_unaligned` on
-     `buf[..size_of::<T>()]` to decode. This was prototyped: the existing
-     `tests/ancillary.rs` passes (3/3) with no `unsafe` left in `bytemuck_ext.rs`,
-     and the public API doesn't change.
-   - For the libc and windows-sys pktinfo types, encode field by field with
-     `to_ne_bytes`/`from_ne_bytes`. That needs no crate and no `unsafe` except
-     the Windows union reads.
-7. **`io_uring_recvmsg_out` header reads** (`iour.rs:652-681`): replace
-   `read_unaligned` with a safe decode, either four `u32::from_ne_bytes` calls
-   or a `zerocopy` derive.
-8. **N4:** clamp `namelen` to `NLEN`. **N5:** make the bound a real `assert!`,
-   or clamp.
-9. **IOCP `transmute::<SOCKADDR_STORAGE, SockAddrStorage>(read_unaligned(..))`**
-   (`iocp.rs:100`): copy `remote_addr_len` bytes (bounded) into
-   `SockAddrStorage::zeroed()` instead of transmuting between two foreign types.
-10. **G3:** write a precise `# Safety` section for `AncillaryIter::new`, and
-    reject `cmsg_len < sizeof(CMSGHDR)` in the Windows `CMSG_NXTHDR` shim.
-    Longer term, consider a safe, bounds-checked cmsg parser over `&[u8]`
-    (see the comparison below). That would make `AncillaryIter::new` safe.
+| Branch | Fixes | State |
+| --- | --- | --- |
+| `fix/iour-recvmsg-out-parse` | N4 | Ready |
+| `fix/repeat-advance-past-capacity` | B3 | Ready |
+| `fix/bytesmut-as-uninit-provenance` | 2e | Ready |
+| `fix/buffer-bounds-hardening` | 2a, 2c | Ready. After the `unsafe trait` change these checks stay as a second line of defence, and the rewrite relies on the `as_mut_slice` fix |
+| `fix/buffer-pointer-stability` | 2b (driver `recvmsg` / `sendmsg`) | Ready. The ancillary hunk that caused N2c is removed |
+| N6: add the missing rustix feature | `compio-io` builds on its own | Not written (one line) |
+| Miri CI for `compio-buf`, split out of `ci/miri-compio-buf` | Regression coverage | Not built: today it's stacked on the breaking commit |
 
-### P3: review debt and decisions
+All branches are one commit behind master and need a rebase before opening.
 
-11. **G1:** rewrite the safety comments in `compio-compat`, `compio-process` and
-    `compio-dispatcher` to the proof standard.
-12. **G2:** review `compio-driver` (about 255 blocks), `compio-executor` and
-    `compio-runtime`. Start with the temporal scope of kernel-held buffers after
-    a future is dropped, and with executor reentrancy.
-13. **D1:** a maintainer decision on `signal-hook-registry`: it removes 7 unsafe
-    blocks, but `SIG_DFL` is no longer restored.
+### 3. When accepted: one breaking release (compio-io 0.11)
+
+- `fix/buffer-trait-soundness`: B1, and the 2a to 2e root cause via the
+  `unsafe trait` markers.
+- The ancillary rewrite from `prototype/ancillary-safe-slices`: N1, N2a to
+  N2c, N7, N8. Rebase onto the trait branch; that branch still carries the old
+  N2c hunk through its merge of `fix/buffer-pointer-stability`, and the rewrite
+  replaces that code anyway.
+- Miri CI job for `compio-io --features ancillary,bytemuck` (needs N6).
+- Optional, same release: make `AncillaryIter::new` a safe `fn`.
+- Right after (touches the same `encode` impls): N3, the safe copy helpers.
+
+### 4. Only if the maintainers reject a break
+
+| Finding | Fallback | Leaves open |
+| --- | --- | --- |
+| N1, N2, N8 | Slice rewrite without the `encode` change (option B). Not built; it would be split from the prototype | N7 |
+| N1 only, if even a rewrite is unwelcome | `fix/ancillary-decode-overread` (ready, held back) | N2, N7, N8 |
+| N7 | Document that `encode` must initialize every byte (no sound non-breaking fix exists) | N7 stays reachable from safe code |
+| B1 | None: every fix changes the API. #1053's second option, split accessors, is also breaking | B1 |
+
+### 5. Later: hardening and review debt
+
+- N5 (a real bound in `copy_addr_from`), the IOCP `transmute`, and the G3
+  `# Safety` wording.
+- G1: safety comments in `compio-compat`, `compio-process` and
+  `compio-dispatcher`.
+- G2: review `compio-driver`, `compio-executor` and `compio-runtime`.
+- D1: maintainers decide on `signal-hook-registry`.
 
 ## Safe alternatives from std and established crates
 
@@ -217,8 +209,8 @@ the std source for `nightly-2026-09-15`.
 | `MmapMut::as_uninit` | std deliberately has no safe `&mut [u8]` → `&mut [MaybeUninit<u8>]` conversion | Covered by the B1 fix |
 | N6 | A rustix feature-gating bug, not an `unsafe` problem | Add the missing rustix feature |
 
-Suggested next step: switch `iour.rs` to `RecvMsgOut::parse` as a P2 change. It
-is small and self-contained, and it closes N4.
+Done: the `RecvMsgOut::parse` switch is on `fix/iour-recvmsg-out-parse` and
+fixes N4 (Ship order, step 2).
 
 ## N1 and N2: pointer fix vs safe slice rewrite
 
@@ -227,8 +219,9 @@ ancillary core from 22 `unsafe` keywords to 6, and after tuning it is faster
 than both master and the pointer fix. The cost is a breaking change to
 `AncillaryData::encode` and about 330 changed lines. The pointer fix on
 `fix/ancillary-decode-overread` fixes only N1, but it is small and non-breaking.
-Recommendation: submit the N1 fix now, and propose the rewrite separately (issue
-first, since it breaks an API) as the fix for N2, N7 and N8.
+Recommendation: propose the rewrite, including the `encode` break, as the fix for
+N1, N2, N7 and N8 (issue first). Hold the pointer fix back as a fallback if the
+break is rejected, since the rewrite would replace it.
 
 The rewrite is prototyped on branch `prototype/ancillary-safe-slices` (one
 commit on top of the N1 branch; not meant to merge as is). It works on `&[u8]` /
@@ -384,13 +377,15 @@ commit:
 
 ### Recommendation
 
-- **Now:** keep bytemuck. Rewrite `bytemuck_ext.rs` on bytemuck's safe
-  functions (P2, step 6) and move the libc impls to field-wise encoding. This
-  removes N3's `unsafe` with no API break and no new dependency.
+- **Keep bytemuck.** With the ancillary break, right after it, rewrite
+  `bytemuck_ext.rs` on bytemuck's safe functions and move the libc impls to
+  field-wise encoding. This removes N3's `unsafe` with no new dependency. Doing
+  it earlier would mean editing the same `encode` impls twice.
 - **For the header and pktinfo decoding:** safe code needs neither crate.
-- **Consider zerocopy only if** the cmsg iterator is rewritten as a safe parser
-  (P2, step 10), where `KnownLayout`/`Ref` do real work. Even then, keep it an
-  internal dependency and don't re-export its traits until zerocopy reaches 1.0.
+- **zerocopy isn't needed for the safe parser either.** The ancillary rewrite
+  was done with `offset_of!` and `from_ne_bytes` instead of a zerocopy mirror
+  of `cmsghdr`. If zerocopy is ever adopted, keep it an internal dependency and
+  don't re-export its traits until it reaches 1.0.
   Switching `BitwiseAncillaryData` from `Pod` to zerocopy traits is a breaking
   change for every implementor. Its benefit is that users no longer write
   `unsafe impl`. That is worth doing in a planned `compio-io` minor bump, but it
