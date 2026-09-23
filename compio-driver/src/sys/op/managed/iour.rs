@@ -2,12 +2,17 @@ use std::{
     collections::VecDeque,
     io,
     mem::{ManuallyDrop, size_of},
+    ops::Range,
     os::fd::{AsFd, AsRawFd},
     ptr::{self, drop_in_place},
 };
 
 use compio_buf::{BufResult, IntoInner, IoBuf, IoBufMut, SetLenExt};
-use io_uring::{opcode, squeue::Flags, types::Fd};
+use io_uring::{
+    opcode,
+    squeue::Flags,
+    types::{Fd, RecvMsgOut},
+};
 use rustix::net::{RecvFlags, ReturnFlags};
 use socket2::{SockAddr, SockAddrStorage, socklen_t};
 
@@ -631,80 +636,71 @@ impl<S> TakeBuffer for RecvMulti<S> {
     }
 }
 
-#[derive(Debug)]
-#[repr(C)]
-#[allow(non_camel_case_types)]
-struct io_uring_recvmsg_out {
-    namelen: u32,
-    controllen: u32,
-    payloadlen: u32,
-    flags: u32,
-}
-
 struct RecvMsgMultiResultImpl {
     buffer: BufferRef,
-    clen: usize,
+    name: Range<usize>,
+    control: Range<usize>,
+    payload: Range<usize>,
+    flags: u32,
 }
 
 const NLEN: usize = size_of::<SockAddrStorage>();
 
 impl RecvMsgMultiResultImpl {
     unsafe fn new(buffer: BufferRef, clen: usize) -> Self {
-        assert!(buffer.len() >= size_of::<io_uring_recvmsg_out>());
-        let header = unsafe {
-            buffer
-                .as_init()
-                .as_ptr()
-                .cast::<io_uring_recvmsg_out>()
-                .read_unaligned()
-        };
-        let total_len =
-            size_of::<io_uring_recvmsg_out>() + NLEN + clen + header.payloadlen as usize;
-        assert!(buffer.len() >= total_len);
-        Self { buffer, clen }
-    }
+        // SAFETY: `msghdr` only holds integers and raw pointers, so all zeros is a
+        // valid value. `RecvMsgOut::parse` only reads the two lengths set below.
+        let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+        msg.msg_namelen = NLEN as _;
+        msg.msg_controllen = clen as _;
 
-    fn header(&self) -> io_uring_recvmsg_out {
-        // SAFETY: we provide enough capacity for the header
-        unsafe {
-            self.buffer
-                .as_ptr()
-                .cast::<io_uring_recvmsg_out>()
-                .read_unaligned()
+        let buf = buffer.as_init();
+        let out = RecvMsgOut::parse(buf, &msg).expect("buffer too short for recvmsg header");
+        assert_eq!(out.payload_data().len(), out.incoming_payload_len() as usize);
+
+        let range = |part: &[u8]| {
+            let start = part.as_ptr().addr() - buf.as_ptr().addr();
+            start..start + part.len()
+        };
+        let name = range(out.name_data());
+        let control = range(out.control_data());
+        let payload = range(out.payload_data());
+        let flags = out.flags();
+
+        Self {
+            buffer,
+            name,
+            control,
+            payload,
+            flags,
         }
     }
 
     fn data(&self) -> &[u8] {
-        let offset = size_of::<io_uring_recvmsg_out>() + NLEN + self.clen;
-        &self.buffer.as_init()[offset..]
+        &self.buffer.as_init()[self.payload.clone()]
     }
 
     fn addr(&self) -> Option<SockAddr> {
-        let header = self.header();
-        if header.namelen == 0 {
+        let name = &self.buffer.as_init()[self.name.clone()];
+        if name.is_empty() {
             None
         } else {
-            let offset = size_of::<io_uring_recvmsg_out>();
             let mut addr = SockAddrStorage::zeroed();
+            // SAFETY: `RecvMsgOut::parse` clamps the name to `msg_namelen`, so
+            // `name.len() <= NLEN`, the size of `addr`.
             unsafe {
-                ptr::copy_nonoverlapping(
-                    self.buffer.as_ptr().add(offset),
-                    &raw mut addr as *mut u8,
-                    header.namelen as usize,
-                );
+                ptr::copy_nonoverlapping(name.as_ptr(), &raw mut addr as *mut u8, name.len());
             }
-            Some(unsafe { SockAddr::new(addr, header.namelen as _) })
+            Some(unsafe { SockAddr::new(addr, name.len() as _) })
         }
     }
 
     fn ancillary(&self) -> &[u8] {
-        let header = self.header();
-        let offset = size_of::<io_uring_recvmsg_out>() + NLEN;
-        &self.buffer.as_init()[offset..offset + header.controllen as usize]
+        &self.buffer.as_init()[self.control.clone()]
     }
 
     fn flags(&self) -> ReturnFlags {
-        ReturnFlags::from_bits_retain(self.header().flags as _)
+        ReturnFlags::from_bits_retain(self.flags as _)
     }
 }
 
