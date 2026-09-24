@@ -563,10 +563,10 @@ pub struct ProactorBuilder {
     sqpoll_idle: Option<Duration>,
     sqpoll_cpu: Option<u32>,
     cqsize: Option<u32>,
-    single_issuer: bool,
-    coop_taskrun: bool,
-    taskrun_flag: bool,
-    defer_taskrun: bool,
+    single_issuer: Option<bool>,
+    coop_taskrun: Option<bool>,
+    taskrun_flag: Option<bool>,
+    defer_taskrun: Option<bool>,
     eventfd: Option<RawFd>,
     driver_type: Option<DriverType>,
     op_flags: OpCodeFlag,
@@ -595,10 +595,10 @@ impl ProactorBuilder {
             sqpoll_idle: None,
             sqpoll_cpu: None,
             cqsize: None,
-            single_issuer: false,
-            coop_taskrun: false,
-            taskrun_flag: false,
-            defer_taskrun: false,
+            single_issuer: None,
+            coop_taskrun: None,
+            taskrun_flag: None,
+            defer_taskrun: None,
             eventfd: None,
             driver_type: None,
             op_flags: OpCodeFlag::empty(),
@@ -700,12 +700,16 @@ impl ProactorBuilder {
 
     /// Set the `io-uring` single issuer hint.
     ///
+    /// If not set, it is enabled when the kernel supports it and
+    /// [`sqpoll_idle`](Self::sqpoll_idle) is not set. See
+    /// [`defer_taskrun`](Self::defer_taskrun) for how the defaults are chosen.
+    ///
     /// # Notes
     ///
     /// - Available since Linux Kernel 6.0.
     /// - Only effective when the `io-uring` feature is enabled
     pub fn single_issuer(&mut self, enable: bool) -> &mut Self {
-        self.single_issuer = enable;
+        self.single_issuer = Some(enable);
         self
     }
 
@@ -714,26 +718,31 @@ impl ProactorBuilder {
     ///
     /// However, it can't run with sqpoll feature.
     ///
+    /// If not set, it is enabled only on kernels that support it but not
+    /// [`defer_taskrun`](Self::defer_taskrun), which supersedes it.
+    ///
     /// # Notes
     ///
     /// - Available since Linux Kernel 5.19.
     /// - Only effective when the `io-uring` feature is enabled
     pub fn coop_taskrun(&mut self, enable: bool) -> &mut Self {
-        self.coop_taskrun = enable;
+        self.coop_taskrun = Some(enable);
         self
     }
 
     /// Allows io-uring driver to know if any cqe's are available when try to
     /// push an sqe to the submission queue.
     ///
-    /// This should be enabled with [`coop_taskrun`](Self::coop_taskrun)
+    /// This should be enabled with [`coop_taskrun`](Self::coop_taskrun) or
+    /// [`defer_taskrun`](Self::defer_taskrun). If not set, it is enabled
+    /// whenever one of them is.
     ///
     /// # Notes
     ///
     /// - Available since Linux Kernel 5.19.
     /// - Only effective when the `io-uring` feature is enabled
     pub fn taskrun_flag(&mut self, enable: bool) -> &mut Self {
-        self.taskrun_flag = enable;
+        self.taskrun_flag = Some(enable);
         self
     }
 
@@ -744,12 +753,21 @@ impl ProactorBuilder {
     /// enabled. The kernel requires `IORING_SETUP_SINGLE_ISSUER` for
     /// `IORING_SETUP_DEFER_TASKRUN`.
     ///
+    /// If not set, it is enabled together with
+    /// [`single_issuer`](Self::single_issuer) and
+    /// [`taskrun_flag`](Self::taskrun_flag), the setup recommended for a
+    /// thread-per-core runtime. On kernels that reject it, the driver falls
+    /// back to the best setup they support. Options that are set explicitly
+    /// are never changed, and none of these options are enabled by default
+    /// when [`sqpoll_idle`](Self::sqpoll_idle) is set, as the kernel rejects
+    /// them together.
+    ///
     /// # Notes
     ///
     /// - Available since Linux Kernel 6.1.
     /// - Only effective when the `io-uring` feature is enabled
     pub fn defer_taskrun(&mut self, enable: bool) -> &mut Self {
-        self.defer_taskrun = enable;
+        self.defer_taskrun = Some(enable);
         self
     }
 

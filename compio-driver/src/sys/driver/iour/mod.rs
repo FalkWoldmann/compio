@@ -53,6 +53,84 @@ bitflags::bitflags! {
         /// See io_uring_enter(2):
         /// <https://man7.org/linux/man-pages/man2/io_uring_enter.2.html>
         const NO_IOWAIT = 1 << 1;
+        /// The ring was set up with `IORING_SETUP_DEFER_TASKRUN`, so
+        /// completions are only posted by an `enter` carrying
+        /// `IORING_ENTER_GETEVENTS`.
+        const DEFER_TASKRUN = 1 << 2;
+    }
+}
+
+/// Setup flags that control how the kernel runs completion task work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TaskRunSetup {
+    single_issuer: bool,
+    defer_taskrun: bool,
+    coop_taskrun: bool,
+    taskrun_flag: bool,
+}
+
+impl TaskRunSetup {
+    /// Setups to try, in order of preference.
+    ///
+    /// Options set on the builder are kept as given. The others start from
+    /// `SINGLE_ISSUER | DEFER_TASKRUN` (Linux 6.1), recommended for a
+    /// thread-per-core runtime, and step down to what older kernels support,
+    /// since those reject unknown setup flags with `EINVAL`. SQPOLL rejects
+    /// the task-run flags, so none of them are chosen for it.
+    fn candidates(builder: &ProactorBuilder) -> Vec<Self> {
+        // (single_issuer, defer_taskrun, coop_taskrun) chosen for unset options
+        const PRESETS: [(bool, bool, bool); 4] = [
+            (true, true, false),   // 6.1
+            (true, false, true),   // 6.0
+            (false, false, true),  // 5.19
+            (false, false, false), // older
+        ];
+        let presets = if builder.sqpoll_idle.is_some() {
+            &PRESETS[3..]
+        } else {
+            &PRESETS[..]
+        };
+
+        let mut candidates = Vec::with_capacity(presets.len());
+        for &(preset_single_issuer, preset_defer_taskrun, preset_coop_taskrun) in presets {
+            let single_issuer = builder.single_issuer.unwrap_or(preset_single_issuer);
+            // The kernel requires SINGLE_ISSUER for DEFER_TASKRUN.
+            let defer_taskrun =
+                single_issuer && builder.defer_taskrun.unwrap_or(preset_defer_taskrun);
+            // Where this kernel could defer task work but the builder rules it
+            // out, cooperative task running is the next best thing.
+            let coop_taskrun = builder
+                .coop_taskrun
+                .unwrap_or(preset_coop_taskrun || (preset_defer_taskrun && !defer_taskrun));
+            let taskrun_flag = builder
+                .taskrun_flag
+                .unwrap_or(coop_taskrun || defer_taskrun);
+            let setup = Self {
+                single_issuer,
+                defer_taskrun,
+                coop_taskrun,
+                taskrun_flag,
+            };
+            if !candidates.contains(&setup) {
+                candidates.push(setup);
+            }
+        }
+        candidates
+    }
+
+    fn apply(&self, builder: &mut io_uring::Builder<SEntry, CEntry>) {
+        if self.single_issuer {
+            builder.setup_single_issuer();
+        }
+        if self.defer_taskrun {
+            builder.setup_defer_taskrun();
+        }
+        if self.coop_taskrun {
+            builder.setup_coop_taskrun();
+        }
+        if self.taskrun_flag {
+            builder.setup_taskrun_flag();
+        }
     }
 }
 
@@ -97,24 +175,26 @@ impl Driver {
                 io_uring_builder.setup_sqpoll_cpu(cpu);
             }
         }
-        if builder.single_issuer {
-            io_uring_builder.setup_single_issuer();
-            if builder.defer_taskrun {
-                io_uring_builder.setup_defer_taskrun();
-            }
-        }
-        if builder.coop_taskrun {
-            io_uring_builder.setup_coop_taskrun();
-        }
-        if builder.taskrun_flag {
-            io_uring_builder.setup_taskrun_flag();
-        }
         if let Some(cqsize) = builder.cqsize {
             io_uring_builder.setup_cqsize(cqsize);
         }
         io_uring_builder.dontfork();
 
-        let inner = io_uring_builder.build(builder.capacity)?;
+        let candidates = TaskRunSetup::candidates(builder);
+        let mut candidates = candidates.iter().peekable();
+        let (inner, setup) = loop {
+            let setup = candidates.next().expect("at least one setup candidate");
+            let mut io_uring_builder = io_uring_builder.clone();
+            setup.apply(&mut io_uring_builder);
+            match io_uring_builder.build(builder.capacity) {
+                Ok(inner) => break (inner, setup),
+                Err(e) if e.raw_os_error() == Some(libc::EINVAL) && candidates.peek().is_some() => {
+                    debug!("io-uring setup {setup:?} rejected, falling back");
+                }
+                Err(e) => return Err(e),
+            }
+        };
+        debug!("io-uring setup: {setup:?}");
 
         let submitter = inner.submitter();
 
@@ -132,6 +212,7 @@ impl Driver {
             DriverFlags::NO_IOWAIT,
             builder.sqpoll_idle.is_none() && inner.params().is_feature_no_iowait(),
         );
+        flags.set(DriverFlags::DEFER_TASKRUN, setup.defer_taskrun);
 
         Ok(Self {
             inner: ManuallyDrop::new(inner),
@@ -200,9 +281,15 @@ impl Driver {
         // On the sleeping path, opt out of iowait accounting (see
         // `DriverFlags::NO_IOWAIT`) by carrying NO_IOWAIT on the same
         // submit-and-wait `enter`.
+        //
+        // With DEFER_TASKRUN, completions are only posted by an `enter`
+        // carrying GETEVENTS. The combined path only sets it when it has to
+        // wait or the kernel raised `IORING_SQ_TASKRUN`, so a non-blocking
+        // submit would leave finished ops unreaped until the next wait.
         let can_block = want_sqe > 0 && timeout != Some(Duration::ZERO);
-        let res = if self.flags.contains(DriverFlags::NO_IOWAIT) && can_block {
-            self.submit_and_wait_no_iowait(want_sqe, timeout)
+        let no_iowait = self.flags.contains(DriverFlags::NO_IOWAIT) && can_block;
+        let res = if no_iowait || self.flags.contains(DriverFlags::DEFER_TASKRUN) {
+            self.submit_and_get_events(want_sqe, timeout, no_iowait)
         } else {
             self.submit_and_wait(want_sqe, timeout)
         };
@@ -224,7 +311,7 @@ impl Driver {
     }
 
     /// The combined submit+wait. Used for zero-timeout drains and when
-    /// `NO_IOWAIT` is unavailable.
+    /// `NO_IOWAIT` is unavailable, unless the ring defers task work.
     fn submit_and_wait(&self, want_sqe: usize, timeout: Option<Duration>) -> io::Result<usize> {
         if let Some(duration) = timeout {
             let timespec = timespec(duration);
@@ -235,29 +322,34 @@ impl Driver {
         }
     }
 
-    /// Submit the pending SQEs and wait on completions in a single `enter`
-    /// carrying `IORING_ENTER_NO_IOWAIT` so the wait is not charged as iowait
-    /// (see `DriverFlags::NO_IOWAIT`). The crate's `submit_*` helpers cannot
-    /// add custom `EnterFlags`, so this drops to the raw `enter` with
-    /// `to_submit = sq_len()` instead of the combined `submit_and_wait`.
-    fn submit_and_wait_no_iowait(
+    /// Submit the pending SQEs and reap completions in a single `enter` that
+    /// always carries `IORING_ENTER_GETEVENTS`, which a DEFER_TASKRUN ring
+    /// needs to post completions (see `DriverFlags::DEFER_TASKRUN`), plus
+    /// `IORING_ENTER_NO_IOWAIT` if `no_iowait` is set so the wait is not
+    /// charged as iowait (see `DriverFlags::NO_IOWAIT`). The crate's
+    /// `submit_*` helpers cannot add custom `EnterFlags`, so this drops to the
+    /// raw `enter` with `to_submit = sq_len()` instead of the combined
+    /// `submit_and_wait`.
+    fn submit_and_get_events(
         &mut self,
         want_sqe: usize,
         timeout: Option<Duration>,
+        no_iowait: bool,
     ) -> io::Result<usize> {
         // Publish the SQ tail and read how many staged SQEs to submit this
         // call.
         let to_submit = self.inner.submission().len() as u32;
         let submitter = self.inner.submitter();
+        let mut flags = EnterFlags::GETEVENTS;
+        flags.set(EnterFlags::NO_IOWAIT, no_iowait);
         if let Some(duration) = timeout {
             let timespec = timespec(duration);
             let args = SubmitArgs::new().timespec(&timespec);
-            let flags = EnterFlags::EXT_ARG | EnterFlags::GETEVENTS | EnterFlags::NO_IOWAIT;
+            let flags = flags | EnterFlags::EXT_ARG;
             // SAFETY: `args` outlives the call; the SQ is synced and holds
             // `to_submit` valid SQEs.
             unsafe { submitter.enter(to_submit, want_sqe as u32, flags.bits(), Some(&args)) }
         } else {
-            let flags = EnterFlags::GETEVENTS | EnterFlags::NO_IOWAIT;
             // SAFETY: the SQ is synced and holds `to_submit` valid SQEs; no arg
             // payload is referenced.
             unsafe {
@@ -561,4 +653,90 @@ fn timespec(duration: std::time::Duration) -> Timespec {
     Timespec::new()
         .sec(duration.as_secs())
         .nsec(duration.subsec_nanos())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup(
+        single_issuer: bool,
+        defer_taskrun: bool,
+        coop_taskrun: bool,
+        taskrun_flag: bool,
+    ) -> TaskRunSetup {
+        TaskRunSetup {
+            single_issuer,
+            defer_taskrun,
+            coop_taskrun,
+            taskrun_flag,
+        }
+    }
+
+    #[test]
+    fn candidates_default() {
+        assert_eq!(
+            TaskRunSetup::candidates(&ProactorBuilder::new()),
+            [
+                setup(true, true, false, true),
+                setup(true, false, true, true),
+                setup(false, false, true, true),
+                setup(false, false, false, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn candidates_sqpoll() {
+        let mut builder = ProactorBuilder::new();
+        builder.sqpoll_idle(Duration::from_millis(10));
+        assert_eq!(
+            TaskRunSetup::candidates(&builder),
+            [setup(false, false, false, false)]
+        );
+    }
+
+    #[test]
+    fn candidates_explicit() {
+        let mut builder = ProactorBuilder::new();
+        builder.single_issuer(false);
+        assert_eq!(
+            TaskRunSetup::candidates(&builder),
+            [
+                setup(false, false, true, true),
+                setup(false, false, false, false),
+            ]
+        );
+
+        let mut builder = ProactorBuilder::new();
+        builder
+            .single_issuer(false)
+            .coop_taskrun(false)
+            .taskrun_flag(false)
+            .defer_taskrun(false);
+        assert_eq!(
+            TaskRunSetup::candidates(&builder),
+            [setup(false, false, false, false)]
+        );
+
+        let mut builder = ProactorBuilder::new();
+        builder.defer_taskrun(true).taskrun_flag(false);
+        assert_eq!(
+            TaskRunSetup::candidates(&builder),
+            [
+                setup(true, true, false, false),
+                setup(true, true, true, false),
+                setup(false, false, true, false),
+                setup(false, false, false, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn default_setup_builds() {
+        // Whichever candidate the running kernel accepts, the driver must come
+        // up and complete an operation.
+        let mut driver = Driver::new(&ProactorBuilder::new()).unwrap();
+        driver.poll(Some(Duration::ZERO)).ok();
+    }
 }
