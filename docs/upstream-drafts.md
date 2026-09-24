@@ -555,12 +555,12 @@ away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 > with offsets. Headers are copied in and out of a `#[repr(C)]` mirror of
 > `cmsghdr` deriving `bytemuck::Pod`, checked against libc's layout by `const`
 > asserts on every target. No pointers into the buffer remain, and there is no
-> runtime `unsafe` in the parser or builder. Parsing gets about 30% faster.
+> runtime `unsafe` in the parser or builder. Parsing gets 10 to 30% faster.
 >
 > **Breaking:** fixing 3 needs `encode(&self, buffer: &mut [u8])`. Only
 > hand-written `impl AncillaryData` blocks are affected, and the change is
 > mechanical. I checked the latest release of all 125 crates.io dependents of
-> compio, compio-io, compio-net and compio-quic: one uses the ancillary API
+> compio, compio-io, compio-net and compio-quic (outside compio itself): one uses the ancillary API
 > (comnoq), and none implement `AncillaryData`. `AncillaryIter::new` also stops
 > being `unsafe`, since the parser accepts any bytes.
 >
@@ -604,9 +604,9 @@ away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 > `CMSG_FIRSTHDR` / `CMSG_NXTHDR` over 20,000 random buffers. The test file passes
 > under Miri with Stacked and Tree Borrows.
 >
-> **Performance** (x86-64, release, median of three runs): parsing three
-> messages takes 12 ns instead of 17 ns. Building them takes 25 ns instead of
-> 18.5 ns, because each push goes through compio-buf's safe buffer methods.
+> **Performance** (x86-64, release, medians over two sessions of three runs):
+> parsing three messages is 10 to 30% faster than master. Building them is 5 to
+> 7 ns slower, because each push goes through compio-buf's safe buffer methods.
 
 ---
 

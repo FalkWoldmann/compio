@@ -89,6 +89,8 @@ cross-target builds:
 | N7, N8 | Yes | N7 needs a custom `AncillaryData`; N8 needs a corrupt buffer |
 | N9 | Yes | compio-quic only sees empty control data if its ECN and pktinfo options failed as unsupported |
 | N4 | Hardening | Not reachable with today's kernel address sizes |
+| Rewrite performance | Roughly | Second session: parse 9.5 vs 11 ns, build 20.7 vs 15 ns. Ranges: parse 10 to 30% faster, build 5 to 7 ns slower |
+| 125 dependents | Yes | 139 unique crates.io dependents of the four crates, 125 outside compio's own crates (re-queried 24 Sep) |
 
 Also found in this pass:
 
