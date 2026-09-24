@@ -42,18 +42,25 @@ move each over, for example
 | Branch | Pushed as | Commit | Draft | Role | Old tip |
 | --- | --- | --- | --- | --- | --- |
 | `fix/iour-recvmsg-out-parse` | `rebased/fix/iour-recvmsg-out-parse` | 256694b | 8 | N4, non-breaking | e8777cf |
-| `fix/buffer-bounds-hardening` | `rebased/fix/buffer-bounds-hardening` | 21906dd | 4 | 2a, 2c, non-breaking | b5e1553 |
+| `fix/buffer-bounds-hardening` | `rebased/fix/buffer-bounds-hardening` | 94219a7 | 4 | 2a, 2c, non-breaking | b5e1553 |
 | `fix/buffer-pointer-stability` | `rebased/fix/buffer-pointer-stability` | 60b630c | 5 | 2b, non-breaking | 89c00b8 |
-| `fix/bytesmut-as-uninit-provenance` | `rebased/fix/bytesmut-as-uninit-provenance` | 055b9e6 | 6 | 2e, non-breaking | 7fd83d8 |
+| `fix/bytesmut-as-uninit-provenance` | `rebased/fix/bytesmut-as-uninit-provenance` | 224fcbb | 6 | 2e, non-breaking | 7fd83d8 |
 | `fix/repeat-advance-past-capacity` | `rebased/fix/repeat-advance-past-capacity` | 95281ed | 7 | B3, non-breaking | b247bcc |
-| `fix/copy-within-init-check` | `fix/copy-within-init-check` | 9278417 | 10 | B1 via `copy_within`, non-breaking | new |
+| `fix/copy-within-init-check` | `fix/copy-within-init-check` | 11e36fe | 10 | B1 via `copy_within`, non-breaking | new |
 | `fix/ancillary-empty-control` | `fix/ancillary-empty-control` | 9147ffc | 11 | N9, non-breaking | new |
 | `fix/compio-io-rustix-net` | `fix/compio-io-rustix-net` | a9082b0 | 12 | N6, non-breaking (rustix workaround) | new |
-| `fix/buffer-trait-soundness` | `rebased/fix/buffer-trait-soundness` | 3b07087 | 9 | B1 (#1053) and the 2a to 2e root cause, breaking. Stacked on 4 to 7 and 10 | 8a2d7b5 |
+| `fix/buffer-trait-soundness` | `rebased/fix/buffer-trait-soundness` | 9a8cdba | 9 | B1 (#1053) and the 2a to 2e root cause, breaking. Stacked on 4 to 7 and 10 | 8a2d7b5 |
 | `fix/ancillary-safe-rewrite` | `rebased/fix/ancillary-safe-rewrite` | de6a2aa | 3 | N1, N2, N3, N7, N8, N9, breaking | 6bf10f2 |
 | `fix/ancillary-decode-overread` | `rebased/fix/ancillary-decode-overread` | e4a5bb0 | none | N1 only. Fallback if the rewrite is rejected | 01c365f |
 
 The rustix fix for N6 is `docs/rustix-timespec-net.patch` (draft 13).
+
+The eight non-breaking branches merge cleanly in any order: their tests live in
+separate files (`compio-buf/tests/`), so no two of them append to the same
+place. `fix/ancillary-empty-control` and `fix/ancillary-safe-rewrite` conflict,
+since the rewrite replaces the code N9 touches; whichever lands second takes
+the rewrite's version. The rewrite also applies cleanly on top of the trait
+branch.
 
 Superseded, not used by any draft (candidates for deletion):
 
