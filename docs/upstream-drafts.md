@@ -319,7 +319,7 @@ away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 > }
 > ```
 >
-> </details
+> </details>
 >
 > #220 fixed this by making the traits `unsafe`, and #555 removed the markers
 > (its description planned an `unsafe fn buffer()` instead, which never landed).
@@ -387,8 +387,10 @@ away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 >
 > 5. **Panic on empty control data.** `recv_msg` returns an empty control buffer
 >    for a datagram without control messages, and `AncillaryIter::new` panics on
->    it with "buffer too short". compio-quic parses every datagram this way. A
->    non-breaking fix is ready as a separate PR.
+>    it with "buffer too short". compio-quic parses every datagram this way and
+>    only gets control data if its ECN or pktinfo socket options took effect,
+>    which it tolerates failing as unsupported. A non-breaking fix is ready as a
+>    separate PR.
 >
 > Full reproducers:
 >
@@ -544,7 +546,7 @@ away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 > }
 > ```
 >
-> </details
+> </details>
 >
 > **Proposed fix** (draft PR: link): parse and build on `&[u8]` / `&mut [u8]`
 > with offsets. Headers are copied in and out of a `#[repr(C)]` mirror of
@@ -735,8 +737,8 @@ and say so. Once they merge, only the last commit remains.
 
 > `recv_msg` returns an empty control buffer when a datagram carries no control
 > messages, and `AncillaryIter::new` panicked on it with "buffer too short".
-> compio-quic parses every received datagram this way, and compio-net's
-> `read_with_ancillary` doc example has the same shape.
+> compio-quic parses every received datagram this way, and only gets control
+> data if its ECN or pktinfo socket options took effect.
 >
 > A buffer too short for a header now yields no messages. The builder keeps its
 > length check. No API change.
