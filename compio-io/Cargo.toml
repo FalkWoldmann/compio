@@ -12,6 +12,7 @@ repository = { workspace = true }
 [dependencies]
 compio-buf = { workspace = true, features = ["arrayvec"] }
 futures-util = { workspace = true, features = ["sink"] }
+memchr = { workspace = true }
 paste = { workspace = true }
 pin-project-lite = { workspace = true, optional = true }
 rustix = { workspace = true, features = ["net"], optional = true }

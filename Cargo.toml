@@ -64,6 +64,7 @@ futures-executor = "0.3.30"
 futures-rustls = { version = "0.26.0", default-features = false }
 futures-util = "0.3.29"
 libc = "0.2.175"
+memchr = "2.7.0"
 mod_use = "0.2.3"
 native-tls = "0.2.13"
 compio-py-dynamic-openssl = "0.5.0"

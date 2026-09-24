@@ -221,16 +221,14 @@ impl<B: IoBufMut> Framer<B> for AnyDelimited<'_> {
             return Ok(None);
         }
 
-        // Search for the first occurrence of any byte in `self.bytes`
-        // TODO(George-Miao): Optimize with memchr if performance is a concern
-        if let Some(pos) = buf
-            .windows(self.bytes.len())
-            .position(|window| window == self.bytes)
-        {
-            Ok(Some(Frame::new(0, pos, self.bytes.len())))
-        } else {
-            Ok(None)
-        }
+        // Search for the first occurrence of `self.bytes`
+        let pos = match self.bytes {
+            [] => panic!("Delimiter must not be empty"),
+            [byte] => memchr::memchr(*byte, buf),
+            bytes => memchr::memmem::find(buf, bytes),
+        };
+
+        Ok(pos.map(|pos| Frame::new(0, pos, self.bytes.len())))
     }
 
     fn enclose(&mut self, buf: &mut B) {
@@ -338,5 +336,64 @@ mod tests {
         assert_eq!(frame, Frame::new(0, 5, 3));
         let payload = frame.slice(buf);
         assert_eq!(payload.as_init(), b"hello");
+    }
+
+    fn extract_delimited(delimiter: &[u8], data: &[u8]) -> Option<Frame> {
+        let buf = data.to_vec().slice(..);
+        AnyDelimited::new(delimiter).extract(&buf).unwrap()
+    }
+
+    #[test]
+    fn test_any_delimited() {
+        for delimiter in [&b"\n"[..], b"\r\n", b"--boundary--"] {
+            let d = delimiter.len();
+            let with = |parts: &[&[u8]]| parts.concat();
+
+            assert_eq!(extract_delimited(delimiter, b""), None);
+            assert_eq!(extract_delimited(delimiter, b"hello"), None);
+            assert_eq!(
+                extract_delimited(delimiter, delimiter),
+                Some(Frame::new(0, 0, d))
+            );
+            assert_eq!(
+                extract_delimited(delimiter, &with(&[b"hello", delimiter])),
+                Some(Frame::new(0, 5, d))
+            );
+            // Only the first frame is extracted
+            assert_eq!(
+                extract_delimited(delimiter, &with(&[b"hi", delimiter, b"there", delimiter])),
+                Some(Frame::new(0, 2, d))
+            );
+            // An incomplete delimiter is not a match
+            assert_eq!(
+                extract_delimited(delimiter, &with(&[b"hello", &delimiter[..d - 1]])),
+                None
+            );
+        }
+
+        // A partial delimiter followed by a full one
+        assert_eq!(
+            extract_delimited(b"\r\n", b"a\rb\r\r\n"),
+            Some(Frame::new(0, 4, 2))
+        );
+    }
+
+    #[test]
+    fn test_line_delimited_long() {
+        let mut data = vec![b'a'; 100_000];
+        let mut framer = LineDelimited::new();
+        assert_eq!(framer.extract(&data.clone().slice(..)).unwrap(), None);
+
+        data[99_999] = b'\n';
+        assert_eq!(
+            framer.extract(&data.slice(..)).unwrap(),
+            Some(Frame::new(0, 99_999, 1))
+        );
+    }
+
+    #[test]
+    #[should_panic = "Delimiter must not be empty"]
+    fn test_any_delimited_empty() {
+        extract_delimited(b"", b"hello");
     }
 }
