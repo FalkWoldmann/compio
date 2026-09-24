@@ -275,6 +275,11 @@ harness = false
 # Windows also benchmarks named pipes, which require fs features, so we include those as well.
 required-features = ["fs", "net"]
 
+[[bench]]
+name = "iouring"
+harness = false
+required-features = ["net"]
+
 [[test]]
 name = "runtime"
 required-features = ["fs", "net", "macros"]
