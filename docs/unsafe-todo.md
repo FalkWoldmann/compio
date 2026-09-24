@@ -92,6 +92,7 @@ cross-target builds:
 | Rewrite performance | Roughly | Second session: parse 9.5 vs 11 ns, build 20.7 vs 15 ns. Ranges: parse 10 to 30% faster, build 5 to 7 ns slower |
 | 125 dependents | Yes | 139 unique crates.io dependents of the four crates, 125 outside compio's own crates (re-queried 24 Sep) |
 | CI replicas | Pass | All 11 branches pass compio's commitlint (after dropping `!` from two headers, shortening one and lower-casing one), minimal-versions clippy and docs, `--no-default-features` check and `cargo doc` |
+| AddressSanitizer | Pass | compio-buf, -io, -driver and -net tests with io_uring and with polling, on master, the trait branch and the rewrite: no ASan errors, same failures as master (IPv6 only), and one LeakSanitizer report that master has too |
 
 Also found in this pass:
 
