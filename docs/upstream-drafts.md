@@ -327,8 +327,8 @@ away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 > **Non-breaking fixes (PRs ready):** clamp in `as_mut_slice`, saturating
 > `reserve`, one call for pointer and length, and a `copy_within` that panics
 > instead of moving spare capacity into the initialized prefix. Plus two bugs
-> Miri found along the way: `BytesMut::as_uninit` provenance and a
-> `Repeat::read` length bug.
+> Miri found along the way: `BytesMut::as_uninit` provenance (Stacked Borrows
+> only) and a `Repeat::read` length bug.
 >
 > **Proposal (breaking, for the next minor):**
 >
@@ -353,7 +353,10 @@ away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 >    `cmsg_len` bytes starting after the header. `cmsg_len` includes the header,
 >    so the slice runs `CMSG_LEN(0)` bytes (16 on Linux) past the payload. Decoded
 >    values are still right because `decode` only reads its own size, which is why
->    tests pass.
+>    tests pass. When the buffer ends right after the message (as below), the
+>    slice runs past the allocation, which is UB under any model; for a prefix of
+>    a larger buffer, such as `&control[..len]`, Stacked Borrows rejects it and
+>    Tree Borrows accepts it.
 >
 >    ```rust
 >    // One u32 message, CMSG_SPACE(4) bytes (Linux glibc, 64-bit).
@@ -645,8 +648,9 @@ away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 **Title:** `fix(buf): derive BytesMut::as_uninit from spare_capacity_mut`
 
 > `BytesMut::as_uninit` built a `capacity()`-long slice from `as_mut_ptr()`,
-> which resolves through `DerefMut` and only covers `len()` bytes. Miri rejects
-> it whenever the buffer has spare capacity. It now derives the slice from
+> which resolves through `DerefMut` and only covers `len()` bytes. Miri with
+> Stacked Borrows rejects it whenever the buffer has spare capacity (Tree
+> Borrows accepts it). It now derives the slice from
 > `spare_capacity_mut`. Includes a test over empty, partially filled and full
 > buffers. No API change.
 
@@ -727,7 +731,10 @@ and say so. Once they merge, only the last commit remains.
 > ```
 >
 > It now panics in exactly that case. Copies within the prefix and copies into
-> spare capacity work as before, including both in-tree callers. No API change.
+> spare capacity work as before, including both in-tree callers. The check is
+> conservative: it also refuses spare bytes the caller already wrote through
+> `as_uninit` but hasn't counted in the length yet; advancing the length first
+> avoids that. No API change.
 
 ---
 

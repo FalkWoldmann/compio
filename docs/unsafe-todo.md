@@ -44,13 +44,13 @@ move each over, for example
 | `fix/iour-recvmsg-out-parse` | `rebased/fix/iour-recvmsg-out-parse` | 256694b | 8 | N4, non-breaking | e8777cf |
 | `fix/buffer-bounds-hardening` | `rebased/fix/buffer-bounds-hardening` | 94219a7 | 4 | 2a, 2c, non-breaking | b5e1553 |
 | `fix/buffer-pointer-stability` | `rebased/fix/buffer-pointer-stability` | 60b630c | 5 | 2b, non-breaking | 89c00b8 |
-| `fix/bytesmut-as-uninit-provenance` | `rebased/fix/bytesmut-as-uninit-provenance` | 224fcbb | 6 | 2e, non-breaking | 7fd83d8 |
+| `fix/bytesmut-as-uninit-provenance` | `rebased/fix/bytesmut-as-uninit-provenance` | ccbd01e | 6 | 2e, non-breaking | 7fd83d8 |
 | `fix/repeat-advance-past-capacity` | `rebased/fix/repeat-advance-past-capacity` | 95281ed | 7 | B3, non-breaking | b247bcc |
 | `fix/copy-within-init-check` | `fix/copy-within-init-check` | 11e36fe | 10 | B1 via `copy_within`, non-breaking | new |
 | `fix/ancillary-empty-control` | `fix/ancillary-empty-control` | 9147ffc | 11 | N9, non-breaking | new |
 | `fix/compio-io-rustix-net` | `fix/compio-io-rustix-net` | a9082b0 | 12 | N6, non-breaking (rustix workaround) | new |
-| `fix/buffer-trait-soundness` | `rebased/fix/buffer-trait-soundness` | 9a8cdba | 9 | B1 (#1053) and the 2a to 2e root cause, breaking. Stacked on 4 to 7 and 10 | 8a2d7b5 |
-| `fix/ancillary-safe-rewrite` | `rebased/fix/ancillary-safe-rewrite` | de6a2aa | 3 | N1, N2, N3, N7, N8, N9, breaking | 6bf10f2 |
+| `fix/buffer-trait-soundness` | `rebased/fix/buffer-trait-soundness` | f160642 | 9 | B1 (#1053) and the 2a to 2e root cause, breaking. Stacked on 4 to 7 and 10 | 8a2d7b5 |
+| `fix/ancillary-safe-rewrite` | `rebased/fix/ancillary-safe-rewrite` | 312d8f9 | 3 | N1, N2, N3, N7, N8, N9, breaking | 6bf10f2 |
 | `fix/ancillary-decode-overread` | `rebased/fix/ancillary-decode-overread` | e4a5bb0 | none | N1 only. Fallback if the rewrite is rejected | 01c365f |
 
 The rustix fix for N6 is `docs/rustix-timespec-net.patch` (draft 13).
@@ -71,6 +71,36 @@ Superseded, not used by any draft (candidates for deletion):
   pointer-stability hunk (N2c). `style/document-unsafe-blocks` and `ci/miri-compio-buf` hold work
   not yet split out (safety comments, Miri CI); rebase them onto
   `fix/buffer-trait-soundness` when that work is picked up.
+
+## Reassessment (24 Sep)
+
+A second, adversarial pass over the claims, with Miri under both models and
+cross-target builds:
+
+| Claim | Holds? | Notes |
+| --- | --- | --- |
+| B1 and siblings (`iter_uninit_slice`, `copy_within`) | Yes, any model | Reads of uninitialized memory |
+| 2a, 2c | Yes, any model | Dangling reference, out-of-bounds write. Needs an implementation whose methods disagree |
+| 2b | Yes | Kernel overwrite shown natively. Needs an `as_uninit` that changes between calls |
+| 2e `BytesMut` | Stacked Borrows only | Tree Borrows accepts it. The fix is still right and costs nothing |
+| B3 `Repeat::read` | Yes | `Vec::set_len` precondition violated |
+| N1 | Depends | Exact-size buffer: out of bounds under any model. Prefix of a larger buffer (`&control[..len]`): Stacked Borrows only |
+| N2a / N2b | Yes | Stacked Borrows and Tree Borrows respectively |
+| N7, N8 | Yes | N7 needs a custom `AncillaryData`; N8 needs a corrupt buffer |
+| N9 | Yes | compio-quic only sees empty control data if its ECN and pktinfo options failed as unsupported |
+| N4 | Hardening | Not reachable with today's kernel address sizes |
+
+Also found in this pass:
+
+- The rewrite didn't compile for Android: `in6_pktinfo::ipi6_ifindex` is `i32`
+  there. Decoding now reads each field as `Pod` with its type inferred.
+  Checked with clippy `-Dwarnings` on 13 targets (musl, i686, aarch64, armv7,
+  ppc64, s390x, Android, macOS, FreeBSD, illumos, both Windows).
+- Three compio-buf PRs conflicted pairwise (tests appended to the same file).
+  Their tests now live in `compio-buf/tests/`.
+- The `copy_within` check is conservative: it also refuses spare bytes the
+  caller already wrote through `as_uninit` but hasn't counted in the length.
+  The model check over every case up to capacity 6 matches the rule exactly.
 
 ## Consolidated findings
 
@@ -136,7 +166,7 @@ unreported upstream.
 | B1 on `Vec<u8>`, `&mut [u8]`, `BytesMut`, `ArrayVec`, `SmallVec`, `MmapMut` | Partly | The issue shows only the array. The same UB was confirmed for `Vec<u8>` and `&mut [u8]` |
 | B1 siblings `iter_uninit_slice`, `copy_within` | No | Same UB by another route. The fix has to cover them too |
 | 2a to 2d | No | Shares the root cause the issue cites (#220's `unsafe trait` removed by #555). Making `as_uninit` an `unsafe fn` alone does not fix these; restoring the `unsafe trait` markers does |
-| 2e, `BytesMut::as_uninit` provenance | No | Separate bug, reachable through ordinary use |
+| 2e, `BytesMut::as_uninit` provenance | No | Separate bug, reachable through ordinary use. Stacked Borrows only: Tree Borrows accepts it |
 | B3, `Repeat::read` | No | Separate bug in `compio-io` |
 | N1, N2a, N2b | No | New. Present on master |
 | N3 to N6, G1 to G3, D1 | No | Hardening, build fix and review debt; they don't need issues of their own |
