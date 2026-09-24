@@ -7,7 +7,9 @@ The reproducers are included in full below, in collapsible blocks (also in
 `docs/reproducers`, verified against master 6d40918). Run the Miri ones with
 `cargo +nightly miri run --example <name>`.
 
-Commit messages contain no `#123` references, so pushing to the fork doesn't
+Commit headers pass compio's commitlint (angular: at most 72 characters, no
+`!`, subjects not sentence-case; breaking changes use a `BREAKING CHANGE:`
+footer). Commit messages contain no `#123` references, so pushing to the fork doesn't
 add links to upstream issues. Put "Fixes #..." in the PR description instead.
 
 Order: post 1 and 2 first (each can link its draft PR). The non-breaking PRs
@@ -571,7 +573,7 @@ away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 
 ## 3. PR: `fix/ancillary-safe-rewrite`
 
-**Title:** `fix(io)!: parse and build control messages on byte slices`
+**Title:** `fix(io): parse and build control messages on byte slices` (breaking; say so in the description)
 
 > Fixes #(issue from 2).
 >
@@ -658,7 +660,7 @@ away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 
 ## 7. PR: `fix/repeat-advance-past-capacity`
 
-**Title:** `fix(io): Repeat::read advanced the buffer past its capacity`
+**Title:** `fix(io): stop Repeat::read from advancing past the capacity`
 
 > `Repeat::read` fills the buffer from index 0 but called the relative
 > `advance(len)`, so a buffer that already held bytes got a length past its
@@ -689,7 +691,7 @@ away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 Open after 4 to 7 and 10 are merged (it is stacked on them), or open as a draft
 and say so. Once they merge, only the last commit remains.
 
-**Title:** `fix(buf)!: make the buffer traits unsafe and as_uninit an unsafe fn`
+**Title:** `fix(buf): make the buffer traits unsafe and as_uninit an unsafe fn` (breaking; say so in the description)
 
 > Fixes #1053.
 >
@@ -715,7 +717,7 @@ and say so. Once they merge, only the last commit remains.
 
 ## 10. PR: `fix/copy-within-init-check`
 
-**Title:** `fix(buf): don't let copy_within move spare capacity into the initialized prefix`
+**Title:** `fix(buf): keep copy_within from moving spare bytes into the prefix`
 
 > See #1053.
 >

@@ -45,12 +45,12 @@ move each over, for example
 | `fix/buffer-bounds-hardening` | `rebased/fix/buffer-bounds-hardening` | 94219a7 | 4 | 2a, 2c, non-breaking | b5e1553 |
 | `fix/buffer-pointer-stability` | `rebased/fix/buffer-pointer-stability` | 60b630c | 5 | 2b, non-breaking | 89c00b8 |
 | `fix/bytesmut-as-uninit-provenance` | `rebased/fix/bytesmut-as-uninit-provenance` | ccbd01e | 6 | 2e, non-breaking | 7fd83d8 |
-| `fix/repeat-advance-past-capacity` | `rebased/fix/repeat-advance-past-capacity` | 95281ed | 7 | B3, non-breaking | b247bcc |
-| `fix/copy-within-init-check` | `fix/copy-within-init-check` | 11e36fe | 10 | B1 via `copy_within`, non-breaking | new |
+| `fix/repeat-advance-past-capacity` | `rebased/fix/repeat-advance-past-capacity` | 793ef5c | 7 | B3, non-breaking | b247bcc |
+| `fix/copy-within-init-check` | `fix/copy-within-init-check` | 2568c1f | 10 | B1 via `copy_within`, non-breaking | new |
 | `fix/ancillary-empty-control` | `fix/ancillary-empty-control` | 9147ffc | 11 | N9, non-breaking | new |
 | `fix/compio-io-rustix-net` | `fix/compio-io-rustix-net` | a9082b0 | 12 | N6, non-breaking (rustix workaround) | new |
-| `fix/buffer-trait-soundness` | `rebased/fix/buffer-trait-soundness` | f160642 | 9 | B1 (#1053) and the 2a to 2e root cause, breaking. Stacked on 4 to 7 and 10 | 8a2d7b5 |
-| `fix/ancillary-safe-rewrite` | `rebased/fix/ancillary-safe-rewrite` | 312d8f9 | 3 | N1, N2, N3, N7, N8, N9, breaking | 6bf10f2 |
+| `fix/buffer-trait-soundness` | `rebased/fix/buffer-trait-soundness` | ba00360 | 9 | B1 (#1053) and the 2a to 2e root cause, breaking. Stacked on 4 to 7 and 10 | 8a2d7b5 |
+| `fix/ancillary-safe-rewrite` | `rebased/fix/ancillary-safe-rewrite` | 46bb428 | 3 | N1, N2, N3, N7, N8, N9, breaking | 6bf10f2 |
 | `fix/ancillary-decode-overread` | `rebased/fix/ancillary-decode-overread` | e4a5bb0 | none | N1 only. Fallback if the rewrite is rejected | 01c365f |
 
 The rustix fix for N6 is `docs/rustix-timespec-net.patch` (draft 13).
@@ -91,6 +91,7 @@ cross-target builds:
 | N4 | Hardening | Not reachable with today's kernel address sizes |
 | Rewrite performance | Roughly | Second session: parse 9.5 vs 11 ns, build 20.7 vs 15 ns. Ranges: parse 10 to 30% faster, build 5 to 7 ns slower |
 | 125 dependents | Yes | 139 unique crates.io dependents of the four crates, 125 outside compio's own crates (re-queried 24 Sep) |
+| CI replicas | Pass | All 11 branches pass compio's commitlint (after dropping `!` from two headers, shortening one and lower-casing one), minimal-versions clippy and docs, `--no-default-features` check and `cargo doc` |
 
 Also found in this pass:
 
