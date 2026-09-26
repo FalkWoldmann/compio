@@ -349,7 +349,10 @@ away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 **Title:** `ancillary: control message parsing and building is unsound`
 
 > `compio_io::ancillary` walks control messages with raw pointers into the
-> buffer. Miri finds UB in normal use:
+> buffer. Miri finds UB in normal use. Bugs 2 and 3 are reachable from entirely
+> safe code: their reproducers contain no `unsafe` at all. Bug 1 needs only the
+> `unsafe` call to `AncillaryIter::new` that every user of the parser writes,
+> given a buffer that meets its contract. 4 and 5 are not UB:
 >
 > 1. **Reading past the payload.** `CMsgRef::decode_data` builds a slice of
 >    `cmsg_len` bytes starting after the header. `cmsg_len` includes the header,
@@ -358,7 +361,12 @@ away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 >    tests pass. When the buffer ends right after the message (as below), the
 >    slice runs past the allocation, which is UB under any model; for a prefix of
 >    a larger buffer, such as `&control[..len]`, Stacked Borrows rejects it and
->    Tree Borrows accepts it.
+>    Tree Borrows accepts it. The reproducer's only `unsafe` is
+>    `AncillaryIter::new`, the call compio-quic and compio's own docs make too,
+>    and it passes one well-formed message, exactly what the kernel writes for a
+>    4-byte payload. That meets the "valid control messages" contract, so the
+>    fault is on compio's side. The contract is vague enough that it should be
+>    tightened as part of the fix.
 >
 >    ```rust
 >    // One u32 message, CMSG_SPACE(4) bytes (Linux glibc, 64-bit).
@@ -372,7 +380,7 @@ away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 >    pointer derived from `&mut cmsghdr` (Stacked Borrows rejects this), and
 >    `self.buffer.advance(cmsg.encode_data(value)?)` writes through an older
 >    pointer after taking a new `&mut` borrow of the buffer (Tree Borrows rejects
->    this). Any `push` shows it:
+>    this). Any `push` shows it, from entirely safe code:
 >
 >    ```rust
 >    let mut buf = AncillaryBuf::<{ ancillary_space::<u32>() }>::new();
@@ -382,8 +390,8 @@ away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 > 3. **`encode` can de-initialize bytes.** `AncillaryData` is a safe trait, and
 >    `encode` gets `&mut [MaybeUninit<u8>]` over bytes that `push` then marks as
 >    initialized. A safe impl that writes `MaybeUninit::uninit()` makes a later
->    read of the buffer UB (Miri needs `-Zmiri-disable-stacked-borrows` to get
->    past 2 first).
+>    read of the buffer UB, again from entirely safe code (Miri needs
+>    `-Zmiri-disable-stacked-borrows` to get past 2 first).
 >
 > 4. **Hang.** libc's Linux `CMSG_NXTHDR` returns the same header again when
 >    `cmsg_len` is within 7 of `usize::MAX`, so the iterator never ends. Not UB,
@@ -397,7 +405,11 @@ away. 3 and 9 wait for the answers to 2 and 1. 13 goes to rustix.
 >    which it tolerates failing as unsupported. A non-breaking fix is ready as a
 >    separate PR.
 >
-> Full reproducers:
+> Full reproducers. `ancillary_push_aliasing` (2) and `ancillary_encode_deinit`
+> (3) contain no `unsafe`. `ancillary_decode_overread` (1) and
+> `ancillary_empty_control` (5) use only `AncillaryIter::new` on valid input.
+> `ancillary_walk_hang` (4) uses it on a deliberately corrupt buffer, which
+> breaks the contract; it shows a hang, not UB.
 >
 > <details><summary>Cargo.toml</summary>
 >
