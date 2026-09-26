@@ -52,6 +52,7 @@ move each over, for example
 | `fix/buffer-trait-soundness` | `rebased/fix/buffer-trait-soundness` | ba00360 | 9 | B1 (#1053) and the 2a to 2e root cause, breaking. Stacked on 4 to 7 and 10 | 8a2d7b5 |
 | `fix/ancillary-safe-rewrite` | `rebased/fix/ancillary-safe-rewrite` | 46bb428 | 3 | N1, N2, N3, N7, N8, N9, breaking | 6bf10f2 |
 | `fix/ancillary-decode-overread` | `rebased/fix/ancillary-decode-overread` | e4a5bb0 | none | N1 only. Fallback if the rewrite is rejected | 01c365f |
+| `refactor/rustix-safe-syscalls` | `refactor/rustix-safe-syscalls` | 0f959a7 | none | 10 libc `unsafe` sites moved to rustix (xattr, Linux affinity, compio-quic socket options), non-breaking | new |
 
 The rustix fix for N6 is `docs/rustix-timespec-net.patch` (draft 13).
 
@@ -318,6 +319,22 @@ the std source for `nightly-2026-09-15`.
   std's `BorrowedBuf` tracks the initialized range and makes raw access
   `unsafe`, but it is unstable (`core_io_borrowed_buf`) and already behind
   compio's `read_buf` feature.
+
+### rustix
+
+`refactor/rustix-safe-syscalls` moves ten `unsafe` libc call sites to rustix's
+safe wrappers: `getxattr`/`fgetxattr`, Linux and Android CPU affinity
+(`CpuSet`, `sched_{get,set}affinity`), and compio-quic's `IPV6_V6ONLY`,
+`IP_RECVTOS`, `IPV6_RECVTCLASS` and `IP(V6)_MTU_DISCOVER`. Platforms rustix
+doesn't cover for an option keep the libc path.
+
+rustix 1.1.5 panics on an xattr size query with a `&mut [MaybeUninit<u8>]`
+buffer (`mid > len` in `buffer.rs:176`); the branch passes an empty initialized
+slice for size queries. Still missing from rustix: raw control messages for
+`sendmsg`/`recvmsg` (why the poll driver calls libc), typed `IP_PKTINFO`,
+`IPV6_PKTINFO`, TOS/TCLASS, `UDP_GRO` and `UDP_SEGMENT` messages, and the socket
+options `IP_PKTINFO`, `IPV6_RECVPKTINFO`, `IP_RECVDSTADDR`, `IP(V6)_DONTFRAG`,
+`UDP_GRO` and `UDP_SEGMENT`.
 
 ### No safe alternative exists
 
