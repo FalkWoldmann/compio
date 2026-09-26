@@ -58,16 +58,14 @@ impl<T: IoBufMut> GetXattr<T> {
     }
 
     pub(crate) fn call(&mut self, _: &mut ()) -> io::Result<usize> {
-        let slice = self.buffer.sys_slice_mut();
-        // SAFETY: both C strings are owned by this operation and remain valid.
-        // The exclusively borrowed buffer exposes its entire writable capacity,
-        // including uninitialized bytes. A size query writes no bytes.
-        syscall!(libc::getxattr(
-            self.path.as_ptr(),
-            self.name.as_ptr(),
-            slice.ptr().cast(),
-            slice.len(),
-        ))
+        let buf = self.buffer.as_uninit();
+        if buf.is_empty() {
+            // Size query. rustix would panic splitting an empty uninit slice
+            // at the returned size, so pass an empty initialized slice.
+            return Ok(rustix::fs::getxattr(&*self.path, &*self.name, &mut [0u8; 0])?);
+        }
+        let (init, _) = rustix::fs::getxattr(&*self.path, &*self.name, buf)?;
+        Ok(init.len())
     }
 }
 
@@ -103,16 +101,13 @@ impl<S: AsFd, T: IoBufMut> FGetXattr<S, T> {
     }
 
     pub(crate) fn call(&mut self, _: &mut ()) -> io::Result<usize> {
-        let slice = self.buffer.sys_slice_mut();
-        // SAFETY: the fd and C string are retained by this operation. The
-        // exclusively borrowed buffer exposes its entire writable capacity,
-        // including uninitialized bytes. A size query writes no bytes.
-        syscall!(libc::fgetxattr(
-            self.fd.as_fd().as_raw_fd(),
-            self.name.as_ptr(),
-            slice.ptr().cast(),
-            slice.len(),
-        ))
+        let buf = self.buffer.as_uninit();
+        if buf.is_empty() {
+            // Size query, as in `GetXattr::call`.
+            return Ok(rustix::fs::fgetxattr(&self.fd, &*self.name, &mut [0u8; 0])?);
+        }
+        let (init, _) = rustix::fs::fgetxattr(&self.fd, &*self.name, buf)?;
+        Ok(init.len())
     }
 }
 
