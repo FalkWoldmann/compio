@@ -92,13 +92,10 @@ impl<'a> Local<'a> {
             return self.header().waker.with_mut(|waker| {
                 crate::panic_guard!();
                 let waker = unsafe { &mut *waker };
-                if state.has_waker() {
-                    if cx.waker().will_wake(unsafe { waker.assume_init_ref() }) {
-                        return Poll::Pending;
-                    }
-                    unsafe { waker.assume_init_drop() };
+                if state.has_waker() && waker.as_ref().is_some_and(|w| cx.waker().will_wake(w)) {
+                    return Poll::Pending;
                 }
-                waker.write(cx.waker().clone());
+                **waker = Some(cx.waker().clone());
                 self.header().state.set_has_waker::<Weak, true>();
 
                 Poll::Pending

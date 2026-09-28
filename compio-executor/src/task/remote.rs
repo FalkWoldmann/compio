@@ -106,10 +106,11 @@ impl<'a> Remote<'a> {
 
                 break Poll::Ready(None);
             } else if state.has_waker()
-                && self
-                    .header()
-                    .waker
-                    .with(|waker| cx.waker().will_wake(unsafe { (&*waker).assume_init_ref() }))
+                && self.header().waker.with(|waker| {
+                    unsafe { &*waker }
+                        .as_ref()
+                        .is_some_and(|w| cx.waker().will_wake(w))
+                })
             {
                 // Waker is already up-to-date, leave it in place.
                 self.header().state.finish_setting_waker::<true>();
@@ -123,13 +124,9 @@ impl<'a> Remote<'a> {
                 // access the waker until we're finished.
                 let waker = unsafe { &mut *ptr };
 
-                if state.has_waker() {
-                    unsafe { waker.assume_init_drop() };
-                }
-
                 // We're in the critical section, executor will wait for us to
                 // finish
-                waker.write(cx.waker().clone());
+                **waker = Some(cx.waker().clone());
             });
 
             self.header().state.finish_setting_waker::<true>();

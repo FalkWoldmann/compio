@@ -1,7 +1,7 @@
 use std::{
     array,
     fmt::Debug,
-    mem::{ManuallyDrop, MaybeUninit, offset_of},
+    mem::{ManuallyDrop, offset_of},
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
     ptr::{self, NonNull, drop_in_place},
@@ -60,10 +60,13 @@ struct Header {
     vtable: &'static TaskVtable,
     tracker: ManuallyDrop<SendWrapper<()>>,
     shared: AtomicPtr<Shared>,
-    waker: UnsafeCell<MaybeUninit<Waker>>,
+    waker: UnsafeCell<ManuallyDrop<Option<Waker>>>,
     /// Zero-sized unless the `console` feature is enabled.
     span: TaskSpan,
 }
+
+// `Waker` has a non-null niche, so `Option` adds no space over the raw slot.
+const _: () = assert!(size_of::<Option<Waker>>() == size_of::<Waker>());
 
 union FutureState<F: Future> {
     future: ManuallyDrop<F>,
@@ -185,7 +188,7 @@ impl Task {
                 vtable: TaskAlloc::<F>::VTABLE,
                 tracker: ManuallyDrop::new(tracker),
                 shared: AtomicPtr::new(shared.as_ptr()),
-                waker: UnsafeCell::new(MaybeUninit::uninit()),
+                waker: UnsafeCell::new(ManuallyDrop::new(None)),
                 span: TaskSpan::new::<F>(meta),
             },
             future: UnsafeCell::new(FutureState {
@@ -287,7 +290,7 @@ impl Task {
                     trace!("Waking up JoinHandle");
                     header
                         .waker
-                        .with_mut(|ptr| unsafe { (*ptr).assume_init_ref() }.wake_by_ref());
+                        .with_mut(|ptr| unsafe { &*ptr }.as_ref().map(Waker::wake_by_ref));
                 }
             } else {
                 trace!("Pending");
@@ -359,7 +362,7 @@ impl Task {
 
             header
                 .waker
-                .with_mut(|ptr| unsafe { drop_in_place(ptr.cast::<Waker>()) });
+                .with_mut(|ptr| drop(unsafe { &mut *ptr }.take()));
         }
 
         trace!("Completed");
@@ -418,12 +421,12 @@ impl Drop for Task {
         };
 
         // The future/result and waker types are unwind-unsafe (ManuallyDrop in
-        // union, MaybeUninit). Dropping them during an existing panic could
-        // trigger a second panic, which would be UB. Skip content drops but
-        // still deallocate the memory, since dealloc does not run destructors
-        // on the inner types. (It does run the one of the task span of the
-        // `console` feature, which is wanted: the console would otherwise show
-        // the task as running forever.)
+        // union and around the waker). Dropping them during an existing panic
+        // could trigger a second panic, which would be UB. Skip content
+        // drops but still deallocate the memory, since dealloc does not
+        // run destructors on the inner types. (It does run the one of
+        // the task span of the `console` feature, which is wanted: the
+        // console would otherwise show the task as running forever.)
         if ::std::thread::panicking() {
             unsafe { (header.vtable.dealloc)(self.0) }
             return;
@@ -449,7 +452,7 @@ impl Drop for Task {
 
             header
                 .waker
-                .with_mut(|ptr| unsafe { drop_in_place(ptr.cast::<Waker>()) });
+                .with_mut(|ptr| drop(unsafe { &mut *ptr }.take()));
         }
 
         trace!("Task deallocated");
