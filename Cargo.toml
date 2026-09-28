@@ -19,6 +19,7 @@ members = [
     "compio-tls",
     "compio-ws",
     "compio-compat",
+    "prototypes/compio-executor-at",
 ]
 resolver = "3"
 

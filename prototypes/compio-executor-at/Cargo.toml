@@ -1,0 +1,21 @@
+[package]
+name = "compio-executor-at"
+version = "0.0.0"
+description = "Prototype: compio-executor's API on top of async-task, for comparison only"
+publish = false
+edition = { workspace = true }
+license = { workspace = true }
+
+[dependencies]
+async-task = "4.7.1"
+compio-send-wrapper = { workspace = true }
+crossbeam-queue = { workspace = true }
+pin-project-lite = { workspace = true }
+slab = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "schedule"
+harness = false
