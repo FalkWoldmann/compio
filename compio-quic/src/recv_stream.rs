@@ -241,9 +241,7 @@ impl RecvStream {
                     Ok(Some(chunk)) => {
                         let bytes = chunk.bytes;
                         let len = bytes.len();
-                        buf[read..read + len].copy_from_slice(unsafe {
-                            std::slice::from_raw_parts(bytes.as_ptr().cast(), len)
-                        });
+                        buf[read..read + len].write_copy_of_slice(&bytes);
                         read += len;
                     }
                     res => {
