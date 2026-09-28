@@ -567,10 +567,16 @@ impl Socket {
             value.as_mut_ptr() as _,
             &mut len
         ))
-        .map(|_| {
-            debug_assert_eq!(len as usize, size_of::<T>());
-            // SAFETY: The value is initialized by `getsockopt`.
-            unsafe { value.assume_init() }
+        .and_then(|_| {
+            if len as usize != size_of::<T>() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "socket option size does not match the requested type",
+                ));
+            }
+            // SAFETY: `getsockopt` initialized `len` bytes, which is all of
+            // `T`.
+            Ok(unsafe { value.assume_init() })
         })
     }
 
@@ -588,10 +594,16 @@ impl Socket {
                 &mut len
             )
         )
-        .map(|_| {
-            debug_assert_eq!(len as usize, size_of::<T>());
-            // SAFETY: The value is initialized by `getsockopt`.
-            unsafe { value.assume_init() }
+        .and_then(|_| {
+            if len as usize != size_of::<T>() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "socket option size does not match the requested type",
+                ));
+            }
+            // SAFETY: `getsockopt` initialized `len` bytes, which is all of
+            // `T`.
+            Ok(unsafe { value.assume_init() })
         })
     }
 
