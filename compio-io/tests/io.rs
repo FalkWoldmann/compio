@@ -154,6 +154,28 @@ fn writev() {
         assert_eq!(len, 10);
         assert_eq!(dst.into_inner(), [1, 1, 4, 5, 1, 4, 1, 9, 1, 9]);
 
+        let mut buf = [0u8; 10];
+        let mut dst = &mut buf[..];
+        let (len, _) = dst
+            .write_vectored([vec![1, 1, 4], vec![], vec![5, 1, 4]])
+            .await
+            .unwrap();
+
+        assert_eq!(len, 6);
+        assert_eq!(dst.len(), 4);
+        assert_eq!(buf, [1, 1, 4, 5, 1, 4, 0, 0, 0, 0]);
+
+        let mut buf = [0u8; 5];
+        let mut dst = &mut buf[..];
+        let (len, _) = dst
+            .write_vectored([vec![1, 1, 4], vec![5, 1, 4], vec![9]])
+            .await
+            .unwrap();
+
+        assert_eq!(len, 5);
+        assert!(dst.is_empty());
+        assert_eq!(buf, [1, 1, 4, 5, 1]);
+
         let mut dst = vec![];
         let (len, _) = dst
             .write_vectored([vec![1, 1, 4], vec![5, 1, 4]])

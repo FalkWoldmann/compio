@@ -164,26 +164,8 @@ impl AsyncWrite for &mut [u8] {
     }
 
     async fn write_vectored<T: IoVectoredBuf>(&mut self, buf: T) -> BufResult<usize, T> {
-        let mut iter = match buf.owned_iter() {
-            Ok(buf) => buf,
-            Err(buf) => return BufResult(Ok(0), buf),
-        };
-        let mut total = 0;
-        loop {
-            let n = match std::io::Write::write(self, iter.as_init()) {
-                Ok(n) => n,
-                // TODO: unlikely
-                Err(e) => return BufResult(Err(e), iter.into_inner()),
-            };
-            total += n;
-            if (**self).is_empty() {
-                return BufResult(Ok(total), iter.into_inner());
-            }
-            match iter.next() {
-                Ok(next) => iter = next,
-                Err(buf) => return BufResult(Ok(total), buf),
-            }
-        }
+        let n = write_vectored_slice(self, &buf);
+        BufResult(Ok(n), buf)
     }
 
     async fn flush(&mut self) -> IoResult<()> {
@@ -193,6 +175,20 @@ impl AsyncWrite for &mut [u8] {
     async fn shutdown(&mut self) -> IoResult<()> {
         Ok(())
     }
+}
+
+fn write_vectored_slice(dst: &mut &mut [u8], buf: &impl IoVectoredBuf) -> usize {
+    let len = dst.len();
+    for slice in buf.iter_slice() {
+        if (**dst).is_empty() {
+            break;
+        }
+        let head = dst
+            .split_off_mut(..slice.len())
+            .unwrap_or_else(|| std::mem::take(dst));
+        head.copy_from_slice(&slice[..head.len()]);
+    }
+    len - dst.len()
 }
 
 macro_rules! impl_write_at {
@@ -208,27 +204,9 @@ macro_rules! impl_write_at {
                 }
 
                 async fn write_vectored_at<T: IoVectoredBuf>(&mut self, buf: T, pos: u64) -> BufResult<usize, T> {
-                    let mut iter = match buf.owned_iter() {
-                        Ok(buf) => buf,
-                        Err(buf) => return BufResult(Ok(0), buf),
-                    };
-                    let mut total = 0;
-                    loop {
-                        let n;
-                        (n, iter) = match self.write_at(iter, pos + total as u64).await {
-                            BufResult(Ok(n), iter) => (n, iter),
-                            // TODO: unlikely
-                            BufResult(Err(e), iter) => return BufResult(Err(e), iter.into_inner()),
-                        };
-                        total += n;
-                        if (*self).is_empty() {
-                            return BufResult(Ok(total), iter.into_inner());
-                        }
-                        match iter.next() {
-                            Ok(next) => iter = next,
-                            Err(buf) => return BufResult(Ok(total), buf),
-                        }
-                    }
+                    let pos = (pos as usize).min(self.len());
+                    let n = write_vectored_slice(&mut &mut self[pos..], &buf);
+                    BufResult(Ok(n), buf)
                 }
             }
         )*
