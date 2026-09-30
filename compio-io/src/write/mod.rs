@@ -172,8 +172,10 @@ impl AsyncWrite for &mut [u8] {
         loop {
             let n = match std::io::Write::write(self, iter.as_init()) {
                 Ok(n) => n,
-                // TODO: unlikely
-                Err(e) => return BufResult(Err(e), iter.into_inner()),
+                Err(e) => {
+                    std::hint::cold_path();
+                    return BufResult(Err(e), iter.into_inner());
+                }
             };
             total += n;
             if (**self).is_empty() {
@@ -217,8 +219,10 @@ macro_rules! impl_write_at {
                         let n;
                         (n, iter) = match self.write_at(iter, pos + total as u64).await {
                             BufResult(Ok(n), iter) => (n, iter),
-                            // TODO: unlikely
-                            BufResult(Err(e), iter) => return BufResult(Err(e), iter.into_inner()),
+                            BufResult(Err(e), iter) => {
+                                std::hint::cold_path();
+                                return BufResult(Err(e), iter.into_inner());
+                            }
                         };
                         total += n;
                         if (*self).is_empty() {
