@@ -27,7 +27,6 @@ compio-send-wrapper = { workspace = true }
 
 # Utils
 flume = { workspace = true, default-features = false }
-futures-util = { workspace = true }
 socket2 = { workspace = true, features = ["all"] }
 thin-cell = { workspace = true, features = ["weak"] }
 synchrony = { workspace = true, features = ["waker_slot"] }

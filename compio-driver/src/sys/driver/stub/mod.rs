@@ -70,7 +70,7 @@ impl Driver {
     }
 
     pub fn waker(&self) -> Waker {
-        futures_util::task::noop_waker()
+        Waker::noop().clone()
     }
 
     pub fn create_buffer_pool(&mut self, _: u16, _: usize) -> io::Result<BufferPool> {

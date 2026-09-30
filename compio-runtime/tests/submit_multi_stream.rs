@@ -1,12 +1,12 @@
 use std::{
     io,
     pin::Pin,
-    task::{Context, Poll},
+    task::{Context, Poll, Waker},
 };
 
 use compio_driver::{BufferRef, op::ReadMulti};
 use compio_runtime::{SubmitMultiFactory, SubmitMultiManaged, SubmitMultiStream};
-use futures_util::{Stream, task::noop_waker_ref};
+use futures_util::Stream;
 
 type Op = ReadMulti<std::fs::File>;
 
@@ -25,7 +25,7 @@ fn poll_error<S>(stream: Pin<&mut S>) -> io::Error
 where
     S: Stream<Item = io::Result<BufferRef>>,
 {
-    let mut cx = Context::from_waker(noop_waker_ref());
+    let mut cx = Context::from_waker(Waker::noop());
     match stream.poll_next(&mut cx) {
         Poll::Ready(Some(Err(error))) => error,
         _ => panic!("factory error was not returned"),
