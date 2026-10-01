@@ -36,6 +36,7 @@ windows-sys = { workspace = true, optional = true, features = [
 tokio = { workspace = true, features = ["macros", "rt"] }
 serde = { version = "1.0.219", features = ["derive"] }
 futures-executor = { workspace = true }
+proptest = "1"
 
 [features]
 default = ["bytes"]
