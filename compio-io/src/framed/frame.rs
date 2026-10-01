@@ -160,13 +160,20 @@ impl<B: IoBufMut> Framer<B> for LengthDelimited {
         } else {
             len_bytes[..lfl].copy_from_slice(&buf[..lfl]);
             u64::from_le_bytes(len_bytes)
-        } as usize;
+        };
 
-        if buf.len() < self.length_field_len + len {
+        let total = usize::try_from(len)
+            .ok()
+            .and_then(|len| len.checked_add(lfl))
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidData, "frame length overflows usize")
+            })?;
+
+        if buf.len() < total {
             return Ok(None);
         }
 
-        Ok(Some(Frame::new(self.length_field_len, len, 0)))
+        Ok(Some(Frame::new(lfl, total - lfl, 0)))
     }
 }
 
