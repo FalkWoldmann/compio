@@ -293,6 +293,26 @@ impl<B: IoBufMut> Framer<B> for NoopFramer {
     }
 }
 
+#[cfg(kani)]
+mod verification {
+    use super::*;
+
+    #[kani::proof]
+    #[kani::unwind(11)]
+    fn length_delimited_extract() {
+        let lfl: usize = kani::any_where(|&lfl| lfl <= LengthDelimited::MAX_LFL);
+        let mut framer = LengthDelimited::new()
+            .set_length_field_len(lfl)
+            .set_length_field_is_big_endian(kani::any());
+        let buf = kani::vec::any_vec::<u8, 10>().slice(..);
+
+        if let Ok(Some(frame)) = Framer::<Vec<u8>>::extract(&mut framer, &buf) {
+            assert_eq!(frame.prefix, lfl);
+            assert!(frame.len() <= buf.len());
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use compio_buf::IntoInner;
