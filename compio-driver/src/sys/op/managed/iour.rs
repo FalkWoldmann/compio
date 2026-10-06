@@ -441,9 +441,12 @@ impl<S> ReadMultiAt<S> {
 unsafe impl<S: AsFd> OpCode for ReadMultiAt<S> {
     type Control = ();
 
-    fn create_entry(&mut self, _: &mut Self::Control) -> OpEntry {
+    fn create_entry(&mut self, control: &mut Self::Control) -> OpEntry {
+        if self.inner.len != 0 {
+            return self.create_entry_fallback(control);
+        }
         let fd = self.inner.fd.as_fd().as_raw_fd();
-        opcode::ReadMulti::new(Fd(fd), self.inner.len, self.inner.buffer_group)
+        opcode::ReadMulti::new(Fd(fd), 0, self.inner.buffer_group)
             .offset(self.inner.offset)
             .build()
             .into()
@@ -509,9 +512,12 @@ impl<S> ReadMulti<S> {
 unsafe impl<S: AsFd> OpCode for ReadMulti<S> {
     type Control = ();
 
-    fn create_entry(&mut self, _: &mut Self::Control) -> OpEntry {
+    fn create_entry(&mut self, control: &mut Self::Control) -> OpEntry {
+        if self.inner.len != 0 {
+            return self.create_entry_fallback(control);
+        }
         let fd = self.inner.fd.as_fd().as_raw_fd();
-        opcode::ReadMulti::new(Fd(fd), self.inner.len, self.inner.buffer_group)
+        opcode::ReadMulti::new(Fd(fd), 0, self.inner.buffer_group)
             .offset(u64::MAX)
             .build()
             .into()
@@ -578,7 +584,7 @@ unsafe impl<S: AsFd> OpCode for RecvMulti<S> {
     type Control = ();
 
     fn create_entry(&mut self, control: &mut Self::Control) -> OpEntry {
-        if is_kernel_at_least((6, 0)) {
+        if is_kernel_at_least((6, 0)) && (self.inner.len == 0 || is_kernel_at_least((6, 17))) {
             let fd = self.inner.fd.as_fd().as_raw_fd();
             opcode::RecvMulti::new(Fd(fd), self.inner.buffer_group)
                 .flags(self.inner.flags.bits() as _)

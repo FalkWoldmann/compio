@@ -51,3 +51,21 @@ async fn test_read_pipe_multi() {
     assert_eq!(buffer.len(), 1);
     assert_eq!(&*buffer[0], HELLO);
 }
+
+#[cfg(unix)]
+#[compio_macros::test]
+async fn test_read_pipe_multi_len() {
+    let (mut rx, mut tx) = pipe::anonymous().await.unwrap();
+    tx.write_all(HELLO).await.unwrap();
+    tx.close().await.unwrap();
+
+    let buffer = rx.read_multi(4).try_collect::<Vec<_>>().await.unwrap();
+    assert!(buffer.iter().all(|b| b.len() <= 4));
+    assert_eq!(
+        buffer
+            .iter()
+            .flat_map(|b| b.iter().copied())
+            .collect::<Vec<_>>(),
+        HELLO
+    );
+}

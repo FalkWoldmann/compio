@@ -181,6 +181,30 @@ async fn test_tcp_recv_multi() {
 }
 
 #[compio_macros::test]
+async fn test_tcp_recv_multi_len() {
+    let listener = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+
+    compio_runtime::spawn(async move {
+        let mut stream = listener.accept().await.unwrap().0;
+        stream.write_all(b"testtest").await.unwrap();
+    })
+    .detach();
+
+    let mut stream = TcpStream::connect(addr).await.unwrap();
+
+    let buffer = stream.read_multi(2).try_collect::<Vec<_>>().await.unwrap();
+    assert!(buffer.iter().all(|b| b.len() <= 2));
+    assert_eq!(
+        buffer
+            .iter()
+            .flat_map(|b| b.iter().copied())
+            .collect::<Vec<_>>(),
+        b"testtest"
+    );
+}
+
+#[compio_macros::test]
 async fn test_udp_recv_multi() {
     let listener = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await.unwrap();
     let addr = listener.local_addr().unwrap();
