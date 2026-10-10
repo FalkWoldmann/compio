@@ -388,6 +388,10 @@ impl WeakKey {
     pub(crate) fn as_ptr(&self) -> *const () {
         self.inner.as_ptr()
     }
+
+    pub(crate) fn is_dropped(&self) -> bool {
+        self.inner.strong_count() == 0
+    }
 }
 
 impl PartialEq for WeakKey {

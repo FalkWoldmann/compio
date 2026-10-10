@@ -15,8 +15,14 @@ use synchrony::unsync::event::{Event, EventListener};
 
 use crate::{ContextExt, Runtime};
 
+/// The size of [`Inner::tokens`] past which it is first pruned.
+const MIN_PRUNE_AT: usize = 64;
+
 struct Inner {
     tokens: RefCell<HashSet<Cancel>>,
+    /// Prune `tokens` of dropped operations when it grows past this, so that a
+    /// long-lived token doesn't keep every operation it has seen.
+    prune_at: Cell<usize>,
     is_cancelled: Cell<bool>,
     driver: Rc<RefCell<Proactor>>,
     notify: Event,
@@ -68,6 +74,7 @@ impl CancelToken {
     pub fn new() -> Self {
         Self(Rc::new(Inner {
             tokens: RefCell::new(HashSet::new()),
+            prune_at: Cell::new(MIN_PRUNE_AT),
             is_cancelled: Cell::new(false),
             driver: Runtime::with_current(|r| r.driver.clone()),
             notify: Event::new(),
@@ -110,7 +117,12 @@ impl CancelToken {
             self.0.driver.borrow_mut().cancel(key.clone());
         } else {
             let token = self.0.driver.borrow_mut().register_cancel(key);
-            self.0.tokens.borrow_mut().insert(token);
+            let mut tokens = self.0.tokens.borrow_mut();
+            if tokens.len() >= self.0.prune_at.get() {
+                tokens.retain(|t| !t.is_dropped());
+                self.0.prune_at.set((tokens.len() * 2).max(MIN_PRUNE_AT));
+            }
+            tokens.insert(token);
         }
     }
 
@@ -160,5 +172,30 @@ impl Future for WaitFuture {
                 ready!(self.listen.poll_unpin(cx))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use compio_buf::BufResult;
+    use compio_driver::op::Asyncify;
+
+    use super::*;
+    use crate::FutureExt;
+
+    #[test]
+    fn prunes_dropped_operations() {
+        Runtime::new().unwrap().block_on(async {
+            let token = CancelToken::new();
+            for _ in 0..1000 {
+                crate::submit(Asyncify::new(|| BufResult(Ok(0), ())))
+                    .with_cancel(token.clone())
+                    .await
+                    .0
+                    .unwrap();
+            }
+            let len = token.0.tokens.borrow().len();
+            assert!(len <= MIN_PRUNE_AT, "{len} operations kept");
+        })
     }
 }

@@ -18,6 +18,12 @@ impl Cancel {
         Self(key.downgrade())
     }
 
+    /// Whether the operation has been dropped, so that cancelling it does
+    /// nothing.
+    pub fn is_dropped(&self) -> bool {
+        self.0.is_dropped()
+    }
+
     pub(crate) fn upgrade(&self) -> Option<ErasedKey> {
         self.0.upgrade()
     }
