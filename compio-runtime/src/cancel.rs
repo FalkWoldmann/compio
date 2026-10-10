@@ -120,7 +120,13 @@ impl CancelToken {
             let mut tokens = self.0.tokens.borrow_mut();
             if tokens.len() >= self.0.prune_at.get() {
                 tokens.retain(|t| !t.is_dropped());
-                self.0.prune_at.set((tokens.len() * 2).max(MIN_PRUNE_AT));
+                let prune_at = (tokens.len() * 2).max(MIN_PRUNE_AT);
+                // `retain` visits every bucket, so don't let a past burst keep
+                // the table large.
+                if tokens.capacity() > prune_at * 2 {
+                    tokens.shrink_to(prune_at);
+                }
+                self.0.prune_at.set(prune_at);
             }
             tokens.insert(token);
         }
@@ -196,6 +202,29 @@ mod tests {
             }
             let len = token.0.tokens.borrow().len();
             assert!(len <= MIN_PRUNE_AT, "{len} operations kept");
+        })
+    }
+
+    #[test]
+    fn shrinks_after_a_burst() {
+        Runtime::new().unwrap().block_on(async {
+            let token = CancelToken::new();
+            let burst = (0..500).map(|_| {
+                crate::submit(Asyncify::new(|| BufResult(Ok(0), ()))).with_cancel(token.clone())
+            });
+            for BufResult(res, _) in futures_util::future::join_all(burst).await {
+                res.unwrap();
+            }
+            let peak = token.0.tokens.borrow().capacity();
+            for _ in 0..200 {
+                crate::submit(Asyncify::new(|| BufResult(Ok(0), ())))
+                    .with_cancel(token.clone())
+                    .await
+                    .0
+                    .unwrap();
+            }
+            let capacity = token.0.tokens.borrow().capacity();
+            assert!(capacity < peak / 2, "capacity {capacity}, was {peak}");
         })
     }
 }
