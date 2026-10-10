@@ -118,7 +118,8 @@ where
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let mut this = self.project();
 
-        if this.listen.poll_unpin(cx).is_ready() {
+        // The listener misses a cancellation from before it was created.
+        if this.future.cancel.is_cancelled() || this.listen.poll_unpin(cx).is_ready() {
             return Poll::Ready(Err(Cancelled));
         }
 
@@ -151,10 +152,31 @@ where
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
 
-        if this.listen.poll_unpin(cx).is_ready() {
+        // The listener misses a cancellation from before it was created.
+        if this.future.cancel.is_cancelled() || this.listen.poll_unpin(cx).is_ready() {
             return Poll::Ready(Some(Err(Cancelled)));
         }
 
         this.future.poll_next_unpin(cx).map(|item| item.map(Ok))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use futures_util::stream;
+
+    use super::*;
+    use crate::{FutureExt as _, Runtime, StreamExt as _};
+
+    #[test]
+    fn fail_fast_after_cancel() {
+        Runtime::new().unwrap().block_on(async {
+            let token = CancelToken::new();
+            token.clone().cancel();
+            let fut = std::future::pending::<()>().with_cancel(token.clone());
+            assert_eq!(fut.fail_fast().await, Err(Cancelled));
+            let mut stream = stream::pending::<()>().with_cancel(token).fail_fast();
+            assert_eq!(stream.next().await, Some(Err(Cancelled)));
+        })
     }
 }
