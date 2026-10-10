@@ -284,3 +284,7 @@ required-features = ["net", "macros"]
 [[test]]
 name = "macros"
 required-features = ["macros"]
+
+[[test]]
+name = "scope"
+required-features = ["net", "macros", "time"]

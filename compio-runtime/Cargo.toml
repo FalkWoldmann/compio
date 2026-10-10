@@ -25,6 +25,7 @@ criterion = { workspace = true, optional = true }
 compio-send-wrapper = { workspace = true }
 futures-util = { workspace = true, features = ["io"] }
 scoped-tls = { workspace = true }
+slab = { workspace = true }
 pin-project-lite = { workspace = true }
 socket2 = { workspace = true }
 synchrony = { workspace = true, features = ["event"] }
@@ -85,4 +86,8 @@ required-features = ["time"]
 
 [[test]]
 name = "panic"
+required-features = ["time"]
+
+[[test]]
+name = "scope"
 required-features = ["time"]

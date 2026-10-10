@@ -25,6 +25,7 @@ mod affinity;
 mod attacher;
 mod cancel;
 mod future;
+mod scope;
 mod waker;
 
 pub mod fd;
@@ -54,7 +55,12 @@ use compio_log::{debug, instrument};
 use crate::affinity::bind_to_cpu_set;
 #[cfg(feature = "time")]
 use crate::time::TimerRuntime;
-pub use crate::{attacher::*, cancel::CancelToken, future::*};
+pub use crate::{
+    attacher::*,
+    cancel::CancelToken,
+    future::*,
+    scope::{Scope, ScopedJoinHandle, scope, try_scope},
+};
 
 scoped_tls::scoped_thread_local!(static CURRENT_RUNTIME: Runtime);
 
