@@ -868,15 +868,21 @@ pub trait ErrorExt: seal::Seal {
 
     /// Whether the error or result is cancelled.
     fn is_cancelled(&self) -> bool {
-        #[cfg(unix)]
-        const CANCEL_ERROR: i32 = libc::ECANCELED;
-        #[cfg(windows)]
-        const CANCEL_ERROR: i32 = windows_sys::Win32::Foundation::ERROR_OPERATION_ABORTED as _;
-
         self.as_io_error()
             .and_then(io::Error::raw_os_error)
             .is_some_and(|e| e == CANCEL_ERROR)
     }
+}
+
+#[cfg(unix)]
+const CANCEL_ERROR: i32 = libc::ECANCELED;
+#[cfg(windows)]
+const CANCEL_ERROR: i32 = windows_sys::Win32::Foundation::ERROR_OPERATION_ABORTED as _;
+
+/// The error a cancelled operation completes with, as recognized by
+/// [`ErrorExt::is_cancelled`].
+pub fn cancelled_error() -> io::Error {
+    io::Error::from_raw_os_error(CANCEL_ERROR)
 }
 
 impl ErrorExt for io::Error {

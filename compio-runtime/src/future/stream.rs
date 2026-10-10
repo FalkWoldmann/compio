@@ -9,13 +9,13 @@ use std::{
 
 use compio_buf::{BufResult, SetLenExt};
 use compio_driver::{
-    BufferPool, BufferRef, Extra, Key, OpCode, Proactor, PushEntry, TakeBuffer,
+    BufferPool, BufferRef, Extra, Key, OpCode, Proactor, PushEntry, TakeBuffer, cancelled_error,
     op::{RecvFromMultiResult, RecvMsgMultiResult},
 };
 use futures_util::{Stream, StreamExt, stream::FusedStream};
 
 use crate::{
-    CancelToken, ContextExt,
+    ContextExt,
     future::{poll_multishot, poll_task_with_extra, submit_raw},
 };
 
@@ -88,13 +88,18 @@ impl<T: OpCode + 'static> Stream for SubmitMulti<T> {
         loop {
             match this.state.take().expect("State error, this is a bug") {
                 State::Idle { op } => {
+                    // Cancelling it once submitted would race with it
+                    // completing.
+                    if cx.is_cancelled() {
+                        *this.state = Some(State::Finished { op });
+                        let extra = this.driver.borrow().default_extra();
+                        return Poll::Ready(Some(BufResult(Err(cancelled_error()), extra)));
+                    }
                     let extra = cx.as_extra(|| this.driver.borrow().default_extra());
                     let entry = submit_raw(&mut this.driver.borrow_mut(), op, extra);
                     match entry {
                         PushEntry::Pending(key) => {
-                            if let Some(cancel) = cx.get_cancel() {
-                                cancel.register(&key);
-                            }
+                            cx.register_cancel(&key);
 
                             *this.state = Some(State::submitted(key))
                         }
@@ -390,7 +395,7 @@ where
                     Some(Err(e)) => break Poll::Ready(Some(Err(e))),
                     None => self.op = None,
                 },
-                None if cx.get_cancel().is_some_and(CancelToken::is_cancelled) => {
+                None if cx.is_cancelled() => {
                     break Poll::Ready(None);
                 }
                 None => match self.factory.create() {

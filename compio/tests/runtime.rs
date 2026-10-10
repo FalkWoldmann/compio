@@ -268,6 +268,21 @@ async fn cancel_token_already_cancelled() {
 }
 
 #[compio_macros::test]
+async fn cancel_token_already_cancelled_ready_read() {
+    let cancel_token = CancelToken::new();
+    cancel_token.clone().cancel();
+
+    let (mut receiver, mut sender) = pipe_pair().await.unwrap();
+    sender.write_all(b"hello world").await.unwrap();
+
+    // The data is there already, but the token was cancelled first.
+    let buf = Vec::with_capacity(1024);
+    let BufResult(res, buf) = receiver.read(buf).with_cancel(cancel_token).await;
+    assert!(res.is_cancelled(), "{res:?}");
+    assert_eq!(buf.capacity(), 1024);
+}
+
+#[compio_macros::test]
 async fn cancel_token_successful_operation() {
     let cancel_token = CancelToken::new();
 

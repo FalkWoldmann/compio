@@ -10,7 +10,7 @@ use std::{
 };
 
 use compio_buf::BufResult;
-use compio_driver::{Extra, Key, OpCode, Proactor, PushEntry};
+use compio_driver::{Extra, Key, OpCode, Proactor, PushEntry, cancelled_error};
 use futures_util::future::FusedFuture;
 
 use crate::{
@@ -28,6 +28,19 @@ pub(crate) trait ContextExt {
 
     /// Get the cancel token
     fn get_cancel(&mut self) -> Option<&CancelToken>;
+
+    /// Whether the cancel token is cancelled already, so that an operation
+    /// shouldn't even be submitted.
+    fn is_cancelled(&mut self) -> bool {
+        self.get_cancel().is_some_and(CancelToken::is_cancelled)
+    }
+
+    /// Register a submitted operation with the cancel token, if any.
+    fn register_cancel<T: OpCode>(&mut self, key: &Key<T>) {
+        if let Some(cancel) = self.get_cancel() {
+            cancel.register(key);
+        }
+    }
 
     /// Set the ext data associated with the waker to an [`Extra`].
     fn as_extra(&mut self, default: impl FnOnce() -> Extra) -> Option<Extra>;
@@ -143,6 +156,11 @@ impl<T: OpCode + 'static> Future for Submit<T, ()> {
                     }
                 }
                 State::Idle { op } => {
+                    // Cancelling it once submitted would race with it
+                    // completing.
+                    if cx.is_cancelled() {
+                        return Poll::Ready(BufResult(Err(cancelled_error()), op));
+                    }
                     let extra = cx.as_extra(|| this.driver.borrow().default_extra());
                     let entry = submit_raw(&mut this.driver.borrow_mut(), op, extra);
                     match entry {
@@ -150,9 +168,7 @@ impl<T: OpCode + 'static> Future for Submit<T, ()> {
                             // TODO: Should we register it only the first time
                             // or every time it's
                             // being polled?
-                            if let Some(cancel) = cx.get_cancel() {
-                                cancel.register(&key);
-                            };
+                            cx.register_cancel(&key);
 
                             *this.state = Some(State::submitted(key))
                         }
@@ -186,13 +202,17 @@ impl<T: OpCode + 'static> Future for Submit<T, Extra> {
                     }
                 }
                 State::Idle { op } => {
+                    // Cancelling it once submitted would race with it
+                    // completing.
+                    if cx.is_cancelled() {
+                        let extra = this.driver.borrow().default_extra();
+                        return Poll::Ready((BufResult(Err(cancelled_error()), op), extra));
+                    }
                     let extra = cx.as_extra(|| this.driver.borrow().default_extra());
                     let entry = submit_raw(&mut this.driver.borrow_mut(), op, extra);
                     match entry {
                         PushEntry::Pending(key) => {
-                            if let Some(cancel) = cx.get_cancel() {
-                                cancel.register(&key);
-                            }
+                            cx.register_cancel(&key);
 
                             *this.state = Some(State::submitted(key))
                         }
