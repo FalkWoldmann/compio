@@ -282,6 +282,45 @@ async fn cancel_token_already_cancelled_ready_read() {
     assert_eq!(buf.capacity(), 1024);
 }
 
+#[test]
+#[cfg(feature = "time")]
+fn cancel_token_more_operations_than_queue_entries() {
+    let mut proactor = compio::driver::ProactorBuilder::new();
+    proactor.capacity(16);
+    let runtime = compio::runtime::Runtime::builder()
+        .with_proactor(proactor)
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let cancel_token = CancelToken::new();
+
+        let mut tasks = Vec::new();
+        for _ in 0..64 {
+            let (mut a, b) = pipe_pair().await.unwrap();
+            let token = cancel_token.clone();
+            tasks.push(compio_runtime::spawn(async move {
+                let res = a.read(Vec::with_capacity(16)).with_cancel(token).await;
+                drop(b);
+                res
+            }));
+        }
+        // Let every read start.
+        compio::time::sleep(Duration::from_millis(10)).await;
+
+        // More cancellations than the submission queue holds at once.
+        cancel_token.cancel();
+        let results = compio::time::timeout(
+            Duration::from_secs(5),
+            futures_util::future::join_all(tasks),
+        )
+        .await
+        .expect("cancelled reads never completed");
+        for res in results {
+            assert!(res.unwrap().is_cancelled());
+        }
+    })
+}
+
 #[compio_macros::test]
 async fn cancel_token_successful_operation() {
     let cancel_token = CancelToken::new();

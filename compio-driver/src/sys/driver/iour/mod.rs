@@ -324,21 +324,15 @@ impl Driver {
     pub fn cancel(&mut self, key: ErasedKey) {
         instrument!(compio_log::Level::TRACE, "cancel", ?key);
         trace!("cancel RawOp");
-        unsafe {
-            #[allow(clippy::useless_conversion)]
-            if self
-                .inner
-                .submission()
-                .push(
-                    &AsyncCancel::new(key.as_raw() as _)
-                        .build()
-                        .user_data(Self::CANCEL)
-                        .into(),
-                )
-                .is_err()
-            {
-                warn!("could not push AsyncCancel entry");
-            }
+        #[allow(clippy::useless_conversion)]
+        let entry = AsyncCancel::new(key.as_raw() as _)
+            .build()
+            .user_data(Self::CANCEL)
+            .into();
+        // Cancelling many operations at once easily fills the queue, so make
+        // room for the entry like for any other.
+        if let Err(e) = self.push_raw(entry) {
+            warn!("could not push AsyncCancel entry: {e}");
         }
     }
 
