@@ -29,18 +29,12 @@ pub(crate) trait ContextExt {
     /// Get the cancel token
     fn get_cancel(&mut self) -> Option<&CancelToken>;
 
-    /// Whether the cancel token is cancelled already, so that an operation
+    /// Whether a cancel token is cancelled already, so that an operation
     /// shouldn't even be submitted.
-    fn is_cancelled(&mut self) -> bool {
-        self.get_cancel().is_some_and(CancelToken::is_cancelled)
-    }
+    fn is_cancelled(&mut self) -> bool;
 
-    /// Register a submitted operation with the cancel token, if any.
-    fn register_cancel<T: OpCode>(&mut self, key: &Key<T>) {
-        if let Some(cancel) = self.get_cancel() {
-            cancel.register(key);
-        }
-    }
+    /// Register a submitted operation with the cancel tokens, if any.
+    fn register_cancel<T: OpCode>(&mut self, key: &Key<T>);
 
     /// Set the ext data associated with the waker to an [`Extra`].
     fn as_extra(&mut self, default: impl FnOnce() -> Extra) -> Option<Extra>;
@@ -53,6 +47,23 @@ impl ContextExt for Context<'_> {
 
     fn get_cancel(&mut self) -> Option<&CancelToken> {
         get_ext(self.waker())?.get_cancel()
+    }
+
+    fn is_cancelled(&mut self) -> bool {
+        get_ext(self.waker()).is_some_and(|ext| {
+            ext.tokens()
+                .into_iter()
+                .flatten()
+                .any(CancelToken::is_cancelled)
+        })
+    }
+
+    fn register_cancel<T: OpCode>(&mut self, key: &Key<T>) {
+        if let Some(ext) = get_ext(self.waker()) {
+            for token in ext.tokens().into_iter().flatten() {
+                token.register(key);
+            }
+        }
     }
 
     fn as_extra(&mut self, default: impl FnOnce() -> Extra) -> Option<Extra> {

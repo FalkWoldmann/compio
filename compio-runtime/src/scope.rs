@@ -2,7 +2,7 @@
 
 use std::{
     any::Any,
-    cell::RefCell,
+    cell::{Cell, RefCell},
     convert::Infallible,
     fmt,
     future::Future,
@@ -16,6 +16,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     task::{Context, Poll, Wake, Waker},
+    thread,
 };
 
 use futures_util::{FutureExt as _, task::AtomicWaker};
@@ -25,15 +26,15 @@ use synchrony::unsync::event::EventListener;
 use crate::{
     CancelToken, ContextExt,
     future::Ext,
-    waker::{ExtWaker, with_ext},
+    waker::{ExtWaker, get_ext, with_ext},
 };
 
 /// Run `f` in a new [`Scope`], and wait for it and every task it spawned.
 ///
 /// [`spawn`](crate::spawn) hands a future to the executor, which may keep it
 /// around for longer than the caller's stack frame, so the future has to be
-/// `'static`. A scope instead owns its children and polls them itself, on
-/// the task that awaits the scope. That lets children borrow anything that
+/// `'static`. A scope instead owns its tasks and polls them itself, on the
+/// task that awaits the scope. That lets the tasks borrow anything that
 /// outlives the scope, and guarantees that none of them outlive it:
 ///
 /// ```
@@ -52,7 +53,7 @@ use crate::{
 /// })
 /// .await;
 ///
-/// // The scope only finishes once every child has.
+/// // The scope only finishes once every task has.
 /// assert_eq!(first, "a");
 /// assert_eq!(total.get(), 2);
 /// # });
@@ -60,44 +61,69 @@ use crate::{
 ///
 /// # Cancellation
 ///
-/// Every scope has its own [`CancelToken`], which the body and every child are
-/// polled with, as if they were wrapped in [`with_cancel`]. [`Scope::cancel`]
-/// cancels the IO operations they have in flight. Those operations complete
-/// with a cancellation error and hand their buffers back, so the children get
-/// to clean up before they finish, and the scope still waits for them.
+/// Every scope has its own [`CancelToken`], which the body and every task are
+/// polled with. A [`with_cancel`] inside the scope adds its token instead of
+/// replacing the scope's. [`Scope::cancel`] cancels the IO operations they
+/// have in flight: those complete with a cancellation error (see
+/// [`ErrorExt::is_cancelled`]) and hand their buffers back. An operation
+/// started after that completes with the same error right away, without being
+/// submitted, so cleanup after a cancellation can't do IO. The tasks keep
+/// running, and the scope still waits for them.
 ///
-/// When the scope itself is polled with a cancel token, cancelling that token
-/// cancels the scope too, and through it any scope nested inside.
+/// When the scope is polled with a cancel token, or inside another scope,
+/// cancelling that token or scope cancels this scope too.
 ///
-/// Timers and other futures that aren't compio operations don't observe the
-/// token. To stop those too, wait on [`Scope::cancel_token`] alongside them,
-/// for example with [`WithCancel::fail_fast`].
+/// The token reaches operations through the waker they're polled with, so
+/// some of them don't observe it:
 ///
-/// Dropping the scope future drops the body and every child right away.
-/// That's safe: an operation whose future is dropped is cancelled, and the
-/// driver keeps its buffer until the kernel is done with it.
+/// - Timers and other futures that aren't compio operations. Race them against
+///   [`Scope::cancel_token`]'s [`wait`](CancelToken::wait), or use
+///   [`WithCancel::fail_fast`].
+/// - Operations polled by a sub-executor with wakers of its own, like
+///   `FuturesUnordered`, `join_all` of many futures, or the `compat` streams of
+///   `compio-io`. Wrap the futures in `.with_cancel(s.cancel_token())` before
+///   handing them over.
+/// - Operations that run on the blocking thread pool, like those of
+///   [`spawn_blocking`](crate::spawn_blocking): the scope waits for them.
+/// - An operation that an IO object keeps between polls stays registered with
+///   the tokens it was first submitted with.
+///
+/// Multishot streams, like `read_multi`, end without an error once the scope is
+/// cancelled, unless they have an operation in flight.
+///
+/// Dropping the scope future drops the body and every task right away. That's
+/// safe: an operation whose future is dropped is cancelled, and the driver
+/// keeps its buffer until the kernel is done with it.
 ///
 /// # Errors
 ///
-/// [`try_scope`] is the fallible version. Children spawned with
+/// [`try_scope`] is the fallible version. Tasks spawned with
 /// [`Scope::try_spawn`] report their errors to the scope. The first error,
-/// from a child or from the body, cancels the scope; once every child has
-/// finished, the scope drops the body if it is still running and returns that
-/// error. Awaiting the handle of a child that failed never completes, so a
-/// body that does so is unwound by the scope, as if it had used `?`.
+/// from a task or from the body, cancels the scope; once every task has
+/// finished, the scope drops the body if it is still running, and returns that
+/// error.
+///
+/// Awaiting the handle of a task that failed never completes. The scope drops
+/// the body or the task that awaits it instead, as if it had used `?`, and a
+/// handle of that task fails in turn.
+///
+/// Cancelling a `try_scope` makes the IO of its tasks fail with the
+/// cancellation error, which fails the scope if a task returns it. To stop
+/// gracefully, have the tasks treat [`ErrorExt::is_cancelled`] errors as
+/// success.
 ///
 /// # Panics
 ///
 /// Panics if it isn't polled inside a compio [`Runtime`](crate::Runtime).
 ///
-/// A panic in the body or in a child drops everything still running in the
+/// A panic in the body or in a task drops everything still running in the
 /// scope, then resumes unwinding from the task that awaits the scope.
 ///
 /// # Limitations
 ///
-/// - All children share one task: a child that does not yield stalls the rest
-///   of the scope, and the whole scope shows up as a single task in
-///   [`console`](crate::console).
+/// - All tasks run on the task that awaits the scope: a task that does not
+///   yield stalls the rest of the scope, and the whole scope shows up as a
+///   single task in [`console`](crate::console).
 /// - Borrowing works for state, not for IO buffers. Operations still need owned
 ///   buffers, because an operation the future of which is dropped is only asked
 ///   to stop, and the kernel may keep writing to its buffer for a while.
@@ -145,11 +171,13 @@ use crate::{
 ///
 /// [`with_cancel`]: crate::FutureExt::with_cancel
 /// [`WithCancel::fail_fast`]: crate::WithCancel::fail_fast
+/// [`ErrorExt::is_cancelled`]: crate::ErrorExt::is_cancelled
 pub async fn scope<'env, F, R>(f: F) -> R
 where
     F: for<'scope> AsyncFnOnce(&'scope Scope<'scope, 'env>) -> R,
 {
     let scope = Scope::new();
+    let _clear = ClearOnDrop(&scope.tasks);
     match Run::new(&scope, f(&scope).map(Ok::<R, Infallible>)).await {
         Ok(value) => value,
     }
@@ -170,6 +198,7 @@ where
     F: for<'scope> AsyncFnOnce(&'scope Scope<'scope, 'env, E>) -> Result<T, E>,
 {
     let scope = Scope::new();
+    let _clear = ClearOnDrop(&scope.tasks);
     Run::new(&scope, f(&scope)).await
 }
 
@@ -178,12 +207,13 @@ where
 /// Created with [`scope`] or [`try_scope`]. `E` is the error type of a
 /// [`try_scope`].
 pub struct Scope<'scope, 'env: 'scope, E = Infallible> {
-    // First, so that it's dropped while the other fields are still around, in
-    // case a task touches them while it's dropped.
     tasks: Tasks,
     shared: Arc<Shared>,
     cancel: CancelToken,
     error: RefCell<Option<E>>,
+    /// Set by the handle of a task that failed, so that whatever awaits it is
+    /// dropped.
+    doomed: Cell<bool>,
     // Both invariant, like `std::thread::Scope`.
     scope: PhantomData<&'scope mut &'scope ()>,
     env: PhantomData<&'env mut &'env ()>,
@@ -199,6 +229,7 @@ impl<'scope, 'env, E> Scope<'scope, 'env, E> {
             }),
             cancel: CancelToken::new(),
             error: RefCell::new(None),
+            doomed: Cell::new(false),
             scope: PhantomData,
             env: PhantomData,
         }
@@ -206,42 +237,44 @@ impl<'scope, 'env, E> Scope<'scope, 'env, E> {
 
     /// Spawn a task that runs concurrently with the rest of the scope.
     ///
-    /// The scope does not finish until the task does. Dropping the returned
-    /// handle does not cancel the task.
+    /// The scope does not finish until the task does. Unlike
+    /// [`JoinHandle`](crate::JoinHandle), dropping the returned handle neither
+    /// cancels nor detaches the task. In a [`try_scope`], errors the task
+    /// returns are not reported to the scope: spawn fallible tasks with
+    /// [`try_spawn`](Self::try_spawn).
     pub fn spawn<F>(&'scope self, future: F) -> ScopedJoinHandle<'scope, F::Output>
     where
         F: Future + 'scope,
         F::Output: 'scope,
     {
-        let slot = Rc::new(RefCell::new(Slot::Pending(None)));
-        let handle = ScopedJoinHandle::new(slot.clone());
-        self.insert(Box::pin(async move { Slot::set(&slot, future.await) }));
+        let (output, handle) = self.output();
+        self.insert(Box::pin(async move { output.set(future.await) }));
         handle
     }
 
     /// Spawn a fallible task that runs concurrently with the rest of the scope.
     ///
     /// If the task fails, the scope is cancelled, and the error is what the
-    /// [`try_scope`] returns, unless another error came first. The returned
-    /// handle then never completes.
+    /// [`try_scope`] returns, unless another error came first. Whatever awaits
+    /// the returned handle is then dropped, see [`scope`].
     pub fn try_spawn<F, T>(&'scope self, future: F) -> ScopedJoinHandle<'scope, T>
     where
         F: Future<Output = Result<T, E>> + 'scope,
         T: 'scope,
     {
-        let slot = Rc::new(RefCell::new(Slot::Pending(None)));
-        let handle = ScopedJoinHandle::new(slot.clone());
+        let (output, handle) = self.output();
         self.insert(Box::pin(async move {
             match future.await {
-                Ok(value) => Slot::set(&slot, value),
+                Ok(value) => output.set(value),
+                // Dropping `output` unset fails the handle.
                 Err(error) => self.fail(error),
             }
         }));
         handle
     }
 
-    /// Cancel the IO operations in flight in this scope, and in the scopes
-    /// nested in it.
+    /// Cancel the IO of the body and every task of this scope, and of the
+    /// scopes nested in it, see [`scope`].
     ///
     /// The tasks themselves keep running, and the scope still waits for them.
     pub fn cancel(&self) {
@@ -268,14 +301,26 @@ impl<'scope, 'env, E> Scope<'scope, 'env, E> {
         self.cancel();
     }
 
+    fn output<T>(&'scope self) -> (Output<T>, ScopedJoinHandle<'scope, T>) {
+        let slot = Rc::new(RefCell::new(Slot::Pending(None)));
+        let handle = ScopedJoinHandle {
+            slot: slot.clone(),
+            doomed: &self.doomed,
+        };
+        (Output(slot), handle)
+    }
+
     fn insert(&'scope self, future: Pin<Box<dyn Future<Output = ()> + 'scope>>) {
         // SAFETY: Only the lifetime is erased. Tasks are only polled by `Run`,
-        // which borrows the scope for `'scope`, and `Run` drops every task when
-        // it's dropped itself, while it still borrows the scope. Only the body
-        // and the tasks can spawn, so none are left for the scope to drop. And
-        // the future of the scope, which holds `Run`, can't outlive `'env`. If
-        // that future is leaked instead, the tasks are never polled or dropped
-        // again, so nothing they borrow is used after it's gone.
+        // which borrows the scope for `'scope`. They are dropped by `Run`, or,
+        // on the paths that skip that (a panic, or a body that never got to
+        // `Run`), by the `ClearOnDrop` that `scope` and `try_scope` declare
+        // right after the scope. Both happen before the scope is dropped, while
+        // what `'env` borrows is still alive, and both drop the tasks through a
+        // shared reference, as they may use the scope while they're dropped.
+        // If the future of the scope is leaked instead, the tasks are never
+        // polled or dropped again, so nothing they borrow is used after it's
+        // gone.
         let future = unsafe {
             mem::transmute::<
                 Pin<Box<dyn Future<Output = ()> + 'scope>>,
@@ -294,6 +339,7 @@ impl<'scope, 'env, E> Scope<'scope, 'env, E> {
             future: Some(future),
             waker: waker.clone(),
             flag,
+            epoch: 0,
         });
         drop(tasks);
         waker.wake();
@@ -312,21 +358,15 @@ impl<E> fmt::Debug for Scope<'_, '_, E> {
 
 /// A handle to await a task spawned in a [`Scope`].
 ///
-/// Dropping it does not cancel the task.
+/// Unlike [`JoinHandle`](crate::JoinHandle), dropping it neither cancels nor
+/// detaches the task.
 pub struct ScopedJoinHandle<'scope, T> {
     slot: Rc<RefCell<Slot<T>>>,
-    _scope: PhantomData<&'scope ()>,
+    doomed: &'scope Cell<bool>,
 }
 
 impl<T> ScopedJoinHandle<'_, T> {
-    fn new(slot: Rc<RefCell<Slot<T>>>) -> Self {
-        Self {
-            slot,
-            _scope: PhantomData,
-        }
-    }
-
-    /// Whether the task has finished.
+    /// Whether the task has finished, successfully or not.
     pub fn is_finished(&self) -> bool {
         !matches!(*self.slot.borrow(), Slot::Pending(_))
     }
@@ -349,6 +389,10 @@ impl<T> Future for ScopedJoinHandle<'_, T> {
                 Slot::Ready(value) => Poll::Ready(value),
                 _ => unreachable!(),
             },
+            Slot::Failed => {
+                self.doomed.set(true);
+                Poll::Pending
+            }
             Slot::Taken => panic!("`ScopedJoinHandle` polled after completion"),
         }
     }
@@ -365,16 +409,35 @@ impl<T> fmt::Debug for ScopedJoinHandle<'_, T> {
 enum Slot<T> {
     Pending(Option<Waker>),
     Ready(T),
+    /// The task failed, or was dropped before it finished.
+    Failed,
     Taken,
 }
 
-impl<T> Slot<T> {
-    fn set(this: &RefCell<Self>, value: T) {
-        if let Slot::Pending(Some(waker)) =
-            mem::replace(&mut *this.borrow_mut(), Slot::Ready(value))
-        {
-            waker.wake();
+/// Where a task puts its output. Dropping it unset fails the handle.
+struct Output<T>(Rc<RefCell<Slot<T>>>);
+
+impl<T> Output<T> {
+    fn set(&self, value: T) {
+        self.resolve(Slot::Ready(value));
+    }
+
+    fn resolve(&self, new: Slot<T>) {
+        let mut slot = self.0.borrow_mut();
+        if let Slot::Pending(waker) = &mut *slot {
+            let waker = waker.take();
+            *slot = new;
+            drop(slot);
+            if let Some(waker) = waker {
+                waker.wake();
+            }
         }
+    }
+}
+
+impl<T> Drop for Output<T> {
+    fn drop(&mut self) {
+        self.resolve(Slot::Failed);
     }
 }
 
@@ -386,21 +449,35 @@ impl Tasks {
         self.0.borrow().is_empty()
     }
 
-    /// Drop every task, including the ones spawned while they're dropped.
-    fn clear(&self) {
+    /// Drop every task, including the ones spawned while they're dropped, and
+    /// even if dropping some of them panics. Returns the first panic.
+    fn clear(&self) -> Option<Payload> {
+        let mut payload = None;
         loop {
             let tasks = mem::take(&mut *self.0.borrow_mut());
             if tasks.is_empty() {
-                break;
+                return payload;
             }
-            drop(tasks);
+            for (_, task) in tasks {
+                if let Err(p) = catch_unwind(AssertUnwindSafe(|| drop(task))) {
+                    payload.get_or_insert(p);
+                }
+            }
         }
     }
 }
 
-impl Drop for Tasks {
+/// Drops the tasks that are left when the scope future is dropped, before the
+/// scope itself, and through a shared reference, as they may use the scope.
+struct ClearOnDrop<'a>(&'a Tasks);
+
+impl Drop for ClearOnDrop<'_> {
     fn drop(&mut self) {
-        self.clear();
+        if let Some(payload) = self.0.clear()
+            && !thread::panicking()
+        {
+            resume_unwind(payload);
+        }
     }
 }
 
@@ -409,6 +486,8 @@ struct Task {
     future: Option<Pin<Box<dyn Future<Output = ()>>>>,
     waker: Waker,
     flag: Arc<TaskWaker>,
+    /// The poll of `Run` that polled it last.
+    epoch: u64,
 }
 
 /// The part of the scope its wakers need, which may be on other threads.
@@ -428,7 +507,7 @@ impl Shared {
 /// The index of the body in [`Shared::ready`].
 const BODY: usize = usize::MAX;
 
-/// How many tasks to poll before yielding to the executor.
+/// How many tasks to poll at most before yielding to the executor.
 const BUDGET: usize = 128;
 
 struct TaskWaker {
@@ -453,17 +532,31 @@ impl Wake for TaskWaker {
 
 type Payload = Box<dyn Any + Send>;
 
+/// What became of a task that was woken.
+enum Turn {
+    Polled,
+    /// It was polled during this poll of `Run` already.
+    Deferred,
+    /// It's gone.
+    Skipped,
+}
+
 /// Polls the body and the tasks of a scope.
 struct Run<'scope, 'env, T, E, Fut> {
     scope: &'scope Scope<'scope, 'env, E>,
     body: Option<Pin<Box<Fut>>>,
     body_waker: Waker,
     body_flag: Arc<TaskWaker>,
+    body_epoch: u64,
     output: Option<T>,
-    /// The cancel token the scope was last polled with, if any.
-    outer: Option<(CancelToken, EventListener)>,
+    /// Listeners of the tokens the scope is polled with, as in `Ext::tokens`.
+    outer: [Option<(CancelToken, EventListener)>; 2],
+    /// Counts the polls, so that each task is polled at most once per poll.
+    epoch: u64,
     /// Reused to drain `Shared::ready` into.
     batch: Vec<usize>,
+    /// Tasks woken again during a poll, left for the next one.
+    deferred: Vec<usize>,
 }
 
 // `output` is never pinned, and `body` is boxed.
@@ -486,122 +579,146 @@ where
             body: Some(Box::pin(body)),
             body_waker,
             body_flag,
+            body_epoch: 0,
             output: None,
-            outer: None,
+            outer: [None, None],
+            epoch: 0,
             batch: Vec::new(),
+            deferred: Vec::new(),
         }
     }
 
-    /// Cancel the scope when the token it's polled with is cancelled.
-    fn link_outer(&mut self, cx: &mut Context<'_>) {
-        let outer = match cx.get_cancel() {
-            Some(outer) if !self.scope.is_cancelled() && *outer != self.scope.cancel => {
-                outer.clone()
+    /// Cancel the scope when a token it's polled with is cancelled.
+    fn link_outer(&mut self, cx: &Context<'_>) {
+        let scope = self.scope;
+        let tokens = get_ext(cx.waker()).map_or([None, None], Ext::tokens);
+        for (outer, token) in self.outer.iter_mut().zip(tokens) {
+            let Some(token) = token.filter(|t| **t != scope.cancel && !scope.is_cancelled()) else {
+                *outer = None;
+                continue;
+            };
+            if token.is_cancelled() {
+                *outer = None;
+                scope.cancel();
+                continue;
             }
-            _ => {
-                self.outer = None;
-                return;
+            if !matches!(outer, Some((t, _)) if t == token) {
+                *outer = Some((token.clone(), token.listen()));
             }
-        };
-        if outer.is_cancelled() {
-            self.outer = None;
-            self.scope.cancel();
-            return;
-        }
-        if !matches!(&self.outer, Some((token, _)) if *token == outer) {
-            self.outer = Some((outer.clone(), outer.listen()));
-        }
-        if let Some((_, listener)) = &mut self.outer {
-            let mut cx = Context::from_waker(cx.get_waker());
-            if listener.poll_unpin(&mut cx).is_ready() {
-                self.outer = None;
-                self.scope.cancel();
+            if let Some((_, listener)) = outer {
+                let mut cx = Context::from_waker(cx.get_waker());
+                if listener.poll_unpin(&mut cx).is_ready() {
+                    *outer = None;
+                    scope.cancel();
+                }
             }
         }
     }
 
-    /// Poll the body and the tasks that were woken, until none are left or the
-    /// budget is spent.
+    /// Poll the body and the tasks that were woken, each at most once, until
+    /// none are left or the budget is spent.
     fn run_ready(&mut self, ext: &Ext<'_>) -> Result<(), Payload> {
         let mut polled = 0;
-        loop {
+        while polled < BUDGET {
             let mut batch = mem::take(&mut self.batch);
             mem::swap(&mut *self.scope.shared.ready(), &mut batch);
-            if batch.is_empty() {
-                self.batch = batch;
-                return Ok(());
-            }
+            let before = polled;
             for &index in &batch {
-                if index == BODY {
-                    self.poll_body(ext)?;
+                let turn = if polled >= BUDGET {
+                    Turn::Deferred
+                } else if index == BODY {
+                    self.poll_body(ext)?
                 } else {
-                    self.poll_task(index, ext)?;
+                    self.poll_task(index, ext)?
+                };
+                match turn {
+                    Turn::Polled => polled += 1,
+                    Turn::Deferred => self.deferred.push(index),
+                    Turn::Skipped => {}
                 }
             }
-            polled += batch.len();
             batch.clear();
             self.batch = batch;
-            if polled >= BUDGET {
-                // Let the other tasks of the executor run before the rest.
-                if !self.scope.shared.ready().is_empty() {
-                    self.scope.shared.waker.wake();
-                }
-                return Ok(());
+            if polled == before {
+                break;
             }
         }
-    }
-
-    fn poll_body(&mut self, ext: &Ext<'_>) -> Result<(), Payload> {
-        let Some(body) = &mut self.body else {
-            return Ok(());
-        };
-        self.body_flag.queued.store(false, Ordering::SeqCst);
-        let waker = &self.body_waker;
-        let poll = catch_unwind(AssertUnwindSafe(|| {
-            ExtWaker::new(waker, ext).poll(body.as_mut())
-        }))?;
-        if let Poll::Ready(result) = poll {
-            self.body = None;
-            match result {
-                Ok(value) => self.output = Some(value),
-                Err(error) => self.scope.fail(error),
-            }
+        if !self.deferred.is_empty() {
+            let mut ready = self.scope.shared.ready();
+            ready.splice(0..0, self.deferred.drain(..));
         }
         Ok(())
     }
 
-    fn poll_task(&mut self, index: usize, ext: &Ext<'_>) -> Result<(), Payload> {
+    fn poll_body(&mut self, ext: &Ext<'_>) -> Result<Turn, Payload> {
+        let Some(body) = &mut self.body else {
+            return Ok(Turn::Skipped);
+        };
+        if self.body_epoch == self.epoch {
+            return Ok(Turn::Deferred);
+        }
+        self.body_epoch = self.epoch;
+        self.body_flag.queued.store(false, Ordering::SeqCst);
+        self.scope.doomed.set(false);
+        let waker = &self.body_waker;
+        let poll = catch_unwind(AssertUnwindSafe(|| {
+            ExtWaker::transient(waker, ext).poll(body.as_mut())
+        }))?;
+        match poll {
+            Poll::Ready(Ok(value)) => {
+                self.body = None;
+                self.output = Some(value);
+            }
+            Poll::Ready(Err(error)) => {
+                self.body = None;
+                self.scope.fail(error);
+            }
+            // It awaits a task that failed.
+            Poll::Pending if self.scope.doomed.get() => self.body = None,
+            Poll::Pending => {}
+        }
+        Ok(Turn::Polled)
+    }
+
+    fn poll_task(&mut self, index: usize, ext: &Ext<'_>) -> Result<Turn, Payload> {
         let tasks = &self.scope.tasks.0;
         let (mut future, waker) = {
             let mut tasks = tasks.borrow_mut();
             // Spurious wakeups are fine: the task may have finished, and its
             // slot may even hold another task by now.
             let Some(task) = tasks.get_mut(index) else {
-                return Ok(());
+                return Ok(Turn::Skipped);
             };
+            if task.epoch == self.epoch {
+                return Ok(Turn::Deferred);
+            }
             let Some(future) = task.future.take() else {
-                return Ok(());
+                return Ok(Turn::Skipped);
             };
+            task.epoch = self.epoch;
             task.flag.queued.store(false, Ordering::SeqCst);
             (future, task.waker.clone())
         };
+        self.scope.doomed.set(false);
         let poll = catch_unwind(AssertUnwindSafe(|| {
-            ExtWaker::new(&waker, ext).poll(future.as_mut())
-        }))?;
-        match poll {
-            Poll::Pending => {
-                if let Some(task) = tasks.borrow_mut().get_mut(index) {
-                    task.future = Some(future);
-                }
-            }
-            Poll::Ready(()) => {
-                let task = tasks.borrow_mut().try_remove(index);
-                // Dropped without the borrow, as they may spawn.
-                drop(task);
-                drop(future);
-            }
+            ExtWaker::transient(&waker, ext).poll(future.as_mut())
+        }));
+        // Finished, or awaits a task that failed.
+        let done = match poll {
+            Ok(Poll::Ready(())) => true,
+            Ok(Poll::Pending) => self.scope.doomed.get(),
+            Err(_) => false,
+        };
+        if done {
+            let task = tasks.borrow_mut().try_remove(index);
+            // Dropped without the borrow, as they may spawn.
+            drop(task);
+            drop(future);
+        } else if let Some(task) = tasks.borrow_mut().get_mut(index) {
+            // A task that panicked is put back to be dropped with the rest.
+            task.future = Some(future);
         }
-        Ok(())
+        poll.map(|_| Turn::Polled)
     }
 }
 
@@ -614,39 +731,61 @@ where
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = &mut *self;
         let scope = this.scope;
-        scope.shared.waker.register(cx.get_waker());
+        this.epoch += 1;
+        // Tasks woken from here on are either polled below, or found in `ready`
+        // once the waker is registered again, so their wakes needn't schedule
+        // the parent.
+        scope.shared.waker.take();
         this.link_outer(cx);
 
         let result = with_ext(cx.waker(), |_, ext| {
-            let ext = ext.with_cancel(&scope.cancel);
+            let ext = ext.in_scope(&scope.cancel);
             this.run_ready(&ext)
         });
         if let Err(payload) = result {
-            this.body = None;
-            scope.tasks.clear();
+            // Keep the panic that got us here: the hook reported any later one.
+            let _ = catch_unwind(AssertUnwindSafe(|| this.body = None));
+            let _ = scope.tasks.clear();
             resume_unwind(payload);
         }
 
-        if !scope.tasks.is_empty() {
-            return Poll::Pending;
+        if scope.tasks.is_empty() {
+            if scope.error.borrow().is_some() {
+                // Every task has finished, so a body that's still running waits
+                // for something that won't come. Dropped without the borrow, as
+                // it may spawn.
+                let body = this.body.take();
+                drop(body);
+                if scope.tasks.is_empty() {
+                    let error = scope.error.take().expect("the error is set");
+                    return Poll::Ready(Err(error));
+                }
+            } else if this.body.is_none() {
+                let value = this.output.take();
+                return Poll::Ready(Ok(
+                    value.expect("the body of a scope is only dropped when the scope fails")
+                ));
+            }
         }
-        if let Some(error) = scope.error.borrow_mut().take() {
-            // Every task has finished, so a body that's still running is most
-            // likely waiting for one that failed.
-            this.body = None;
-            return Poll::Ready(Err(error));
+
+        scope.shared.waker.register(cx.get_waker());
+        if !scope.shared.ready().is_empty() {
+            // Left for the next poll, or woken since.
+            cx.get_waker().wake_by_ref();
         }
-        match this.output.take() {
-            Some(value) => Poll::Ready(Ok(value)),
-            None => Poll::Pending,
-        }
+        Poll::Pending
     }
 }
 
 impl<T, E, Fut> Drop for Run<'_, '_, T, E, Fut> {
     fn drop(&mut self) {
         self.body = None;
-        self.scope.tasks.clear();
+        let payload = self.scope.tasks.clear();
         self.scope.shared.ready().clear();
+        if let Some(payload) = payload
+            && !thread::panicking()
+        {
+            resume_unwind(payload);
+        }
     }
 }

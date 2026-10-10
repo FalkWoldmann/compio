@@ -17,16 +17,20 @@ use crate::CancelToken;
 pub(crate) struct Ext<'a> {
     personality: Option<u16>,
     cancel: Option<Cow<'a, CancelToken>>,
+    /// The token of the innermost scope, which `with_cancel` doesn't replace.
+    scope: Option<Cow<'a, CancelToken>>,
 }
 
 impl<'a> Ext<'a> {
     pub fn to_owned(&self) -> Ext<'static> {
+        fn owned(token: &Option<Cow<'_, CancelToken>>) -> Option<Cow<'static, CancelToken>> {
+            token.as_ref().map(|x| Cow::Owned(x.clone().into_owned()))
+        }
+
         Ext {
             personality: self.personality,
-            cancel: self
-                .cancel
-                .as_ref()
-                .map(|x| Cow::Owned(x.clone().into_owned())),
+            cancel: owned(&self.cancel),
+            scope: owned(&self.scope),
         }
     }
 }
@@ -36,6 +40,7 @@ impl<'a> Ext<'a> {
         Self {
             personality: Some(personality),
             cancel: self.cancel.clone(),
+            scope: self.scope.clone(),
         }
     }
 
@@ -43,11 +48,30 @@ impl<'a> Ext<'a> {
         Self {
             personality: self.personality,
             cancel: Some(Cow::Borrowed(token)),
+            scope: self.scope.clone(),
         }
     }
 
+    /// The data for the body and the tasks of a scope with the given token.
+    ///
+    /// The tokens the scope itself is polled with are linked to its own, so
+    /// they're left out.
+    pub fn in_scope(&self, token: &'a CancelToken) -> Self {
+        Self {
+            personality: self.personality,
+            cancel: None,
+            scope: Some(Cow::Borrowed(token)),
+        }
+    }
+
+    /// The innermost cancel token.
     pub fn get_cancel(&self) -> Option<&CancelToken> {
-        self.cancel.as_deref()
+        self.cancel.as_deref().or(self.scope.as_deref())
+    }
+
+    /// Every cancel token that applies, which operations are registered with.
+    pub fn tokens(&self) -> [Option<&CancelToken>; 2] {
+        [self.cancel.as_deref(), self.scope.as_deref()]
     }
 
     pub fn set_extra(&self, extra: &mut Extra) -> bool {
@@ -100,7 +124,8 @@ pub trait FutureExt {
     /// Sets the cancel token for this future.
     ///
     /// If multiple [`CancelToken`]s are set, the innermost one (the one being
-    /// polled last) will take precedence.
+    /// polled last) will take precedence. Inside a [`scope`](crate::scope),
+    /// the token of the scope applies as well.
     fn with_cancel(self, token: CancelToken) -> WithCancel<Self>
     where
         Self: Sized,
@@ -154,7 +179,8 @@ pub trait StreamExt {
     /// Sets the cancel token for this stream.
     ///
     /// If multiple [`CancelToken`]s are set, the innermost one (the one being
-    /// polled last) will take precedence.
+    /// polled last) will take precedence. Inside a [`scope`](crate::scope),
+    /// the token of the scope applies as well.
     fn with_cancel(self, token: CancelToken) -> WithCancel<Self>
     where
         Self: Sized,

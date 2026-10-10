@@ -64,6 +64,8 @@ pub(crate) struct ExtWaker<'a, 'b> {
     // `SendWrapper<&Ext>` will not panic when being dropped on other thread since references
     // doesn't need drop
     ext: SendWrapper<&'a Ext<'b>>,
+    /// Whether clones keep the extra data.
+    clone_ext: bool,
 }
 
 // `static` guarantees the uniqueness of vtable in memory
@@ -86,6 +88,20 @@ impl<'a, 'b> ExtWaker<'a, 'b> {
         Self {
             waker,
             ext: SendWrapper::new(ext),
+            clone_ext: true,
+        }
+    }
+
+    /// Like [`new`](Self::new), but its clones are clones of `waker`.
+    ///
+    /// This is for a waker that already gets polled with the extra data
+    /// whenever it's woken: its clones then neither allocate nor keep the data
+    /// alive.
+    pub fn transient(waker: &'a Waker, ext: &'a Ext<'b>) -> Self {
+        Self {
+            waker,
+            ext: SendWrapper::new(ext),
+            clone_ext: false,
         }
     }
 
@@ -112,7 +128,7 @@ impl<'a, 'b> ExtWaker<'a, 'b> {
     unsafe fn clone(ptr: *const ()) -> RawWaker {
         let this = unsafe { Self::from_raw(ptr) };
 
-        if let Some(owned) = this.to_owned() {
+        if let Some(owned) = this.clone_ext.then(|| this.to_owned()).flatten() {
             let waker = ManuallyDrop::new(owned.into_std());
             RawWaker::new(waker.data(), waker.vtable())
         } else {

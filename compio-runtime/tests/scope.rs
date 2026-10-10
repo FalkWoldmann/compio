@@ -10,7 +10,11 @@ use std::{
     time::Duration,
 };
 
-use compio_runtime::{FutureExt, Runtime, scope, time::sleep, try_scope};
+use compio_runtime::{
+    FutureExt, Runtime, Scope, scope,
+    time::{sleep, timeout},
+    try_scope,
+};
 use futures_util::future::{Either, poll_fn, select};
 
 /// Sets its flag when dropped.
@@ -115,7 +119,8 @@ fn other_tasks_keep_running() {
             }
         })
         .await;
-        assert!(ticks.get() > 1, "ticker ran {} times", ticks.get());
+        // About 11000 polls in all, at most 128 between ticks.
+        assert!(ticks.get() > 40, "ticker ran {} times", ticks.get());
         drop(ticker);
     })
 }
@@ -291,6 +296,373 @@ fn leaking_the_scope_is_harmless() {
         drop(data);
         // The child's timer fires and wakes the scope, which nobody polls.
         sleep(Duration::from_millis(20)).await;
+    })
+}
+
+#[test]
+fn nested_scopes_keep_other_tasks_running() {
+    // The budget holds across nesting, rather than multiplying.
+    block_on(async {
+        let ticks = Rc::new(Cell::new(0));
+        let ticker = compio_runtime::spawn({
+            let ticks = ticks.clone();
+            async move {
+                loop {
+                    ticks.set(ticks.get() + 1);
+                    yield_now().await;
+                }
+            }
+        });
+        scope(async |s| {
+            s.spawn(scope(async |inner| {
+                for _ in 0..1000 {
+                    inner.spawn(async {
+                        for _ in 0..10 {
+                            yield_now().await;
+                        }
+                    });
+                }
+            }));
+        })
+        .await;
+        assert!(ticks.get() > 40, "ticker ran {} times", ticks.get());
+        drop(ticker);
+    })
+}
+
+#[test]
+fn child_awaiting_a_failed_sibling_is_dropped() {
+    block_on(async {
+        let waiter_dropped = Cell::new(false);
+        let chained_dropped = Cell::new(false);
+        let result: Result<(), &str> = timeout(
+            Duration::from_secs(5),
+            try_scope(async |s| {
+                let failing = s.try_spawn(async {
+                    yield_now().await;
+                    Err::<(), _>("boom")
+                });
+                let waiter = s.spawn(async {
+                    let _guard = DropFlag(&waiter_dropped);
+                    failing.await;
+                    unreachable!("awaited a task that failed");
+                });
+                // Dropping the waiter fails its handle in turn.
+                s.spawn(async {
+                    let _guard = DropFlag(&chained_dropped);
+                    waiter.await;
+                });
+                Ok(())
+            }),
+        )
+        .await
+        .expect("the scope hung");
+
+        assert_eq!(result, Err("boom"));
+        assert!(waiter_dropped.get());
+        assert!(chained_dropped.get());
+    })
+}
+
+#[test]
+fn body_awaiting_a_failed_task_is_dropped_right_away() {
+    // The body's locals are released at once, as with `?`, even though other
+    // tasks are still running and wait for that.
+    block_on(async {
+        let body_dropped = Cell::new(false);
+        let result: Result<(), &str> = timeout(
+            Duration::from_secs(5),
+            try_scope(async |s| {
+                let _guard = DropFlag(&body_dropped);
+                s.spawn(async {
+                    while !body_dropped.get() {
+                        yield_now().await;
+                    }
+                });
+                s.try_spawn(async { Err::<(), _>("boom") }).await;
+                unreachable!("awaited a task that failed");
+            }),
+        )
+        .await
+        .expect("the scope hung");
+        assert_eq!(result, Err("boom"));
+    })
+}
+
+/// Spawns a task setting its flag when dropped, and formats the scope.
+struct SpawnOnDrop<'s, 'e, E>(&'s Scope<'s, 'e, E>, &'s Cell<bool>);
+
+impl<E> Drop for SpawnOnDrop<'_, '_, E> {
+    fn drop(&mut self) {
+        let _ = format!("{:?}", self.0);
+        let flag = self.1;
+        self.0.spawn(async move { flag.set(true) });
+    }
+}
+
+#[test]
+fn cleanup_spawned_while_a_failed_body_is_dropped_runs() {
+    block_on(async {
+        let cleaned_up = Cell::new(false);
+        let result: Result<(), &str> = try_scope(async |s| {
+            let _guard = SpawnOnDrop(s, &cleaned_up);
+            s.try_spawn(async { Err::<(), _>("boom") });
+            // Not a failed task: the body is only dropped once the tasks are
+            // done.
+            std::future::pending::<()>().await;
+            Ok(())
+        })
+        .await;
+        assert_eq!(result, Err("boom"));
+        assert!(cleaned_up.get(), "the cleanup task never ran");
+    })
+}
+
+/// Panics when dropped.
+struct PanicOnDrop(&'static str);
+
+impl Drop for PanicOnDrop {
+    fn drop(&mut self) {
+        panic!("{}", self.0);
+    }
+}
+
+/// Cancels and spawns on the scope when dropped, as a task may.
+struct UseOnDrop<'s, 'e>(&'s Scope<'s, 'e>, &'s Cell<bool>);
+
+impl Drop for UseOnDrop<'_, '_> {
+    fn drop(&mut self) {
+        self.0.cancel();
+        self.0.spawn(async {});
+        self.1.set(true);
+    }
+}
+
+#[test]
+fn tasks_are_dropped_when_dropping_the_body_panics() {
+    let child_dropped = Cell::new(false);
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        block_on(async {
+            let mut scope = Box::pin(scope(async |s| {
+                s.spawn(async {
+                    let _guard = UseOnDrop(s, &child_dropped);
+                    std::future::pending::<()>().await;
+                });
+                let _bomb = PanicOnDrop("body dropped");
+                std::future::pending::<()>().await;
+            }));
+            poll_fn(|cx| {
+                assert!(scope.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            drop(scope);
+        })
+    }));
+    let payload = result.unwrap_err();
+    assert_eq!(payload.downcast_ref::<String>().unwrap(), "body dropped");
+    assert!(child_dropped.get());
+}
+
+thread_local! {
+    static SYNC_CHILD_DROPPED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// A body that isn't `async`, so it runs before the scope is first polled.
+fn sync_body<'s, 'e>(s: &'s Scope<'s, 'e>) -> std::future::Ready<()> {
+    // Moved in, so that dropping the task drops it although it never ran.
+    let guard = SyncUseOnDrop(s);
+    s.spawn(async move {
+        let _guard = guard;
+        std::future::pending::<()>().await;
+    });
+    panic!("sync body");
+}
+
+/// Like `UseOnDrop`, with a flag that outlives the scope.
+struct SyncUseOnDrop<'s, 'e>(&'s Scope<'s, 'e>);
+
+impl Drop for SyncUseOnDrop<'_, '_> {
+    fn drop(&mut self) {
+        self.0.cancel();
+        self.0.spawn(async {});
+        SYNC_CHILD_DROPPED.set(true);
+    }
+}
+
+#[test]
+fn tasks_are_dropped_when_a_sync_body_panics() {
+    let result = catch_unwind(|| block_on(scope(sync_body)));
+    assert!(result.is_err());
+    assert!(SYNC_CHILD_DROPPED.get());
+}
+
+#[test]
+fn panicking_destructors_dont_stop_the_teardown() {
+    let dropped = [Cell::new(false), Cell::new(false)];
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        block_on(async {
+            let mut scope = Box::pin(scope(async |s| {
+                for flag in &dropped {
+                    s.spawn(async move {
+                        let _flag = DropFlag(flag);
+                        let _bomb = PanicOnDrop("child dropped");
+                        std::future::pending::<()>().await;
+                    });
+                }
+                std::future::pending::<()>().await;
+            }));
+            poll_fn(|cx| {
+                assert!(scope.as_mut().poll(cx).is_pending());
+                Poll::Ready(())
+            })
+            .await;
+            drop(scope);
+        })
+    }));
+    let payload = result.unwrap_err();
+    assert_eq!(payload.downcast_ref::<String>().unwrap(), "child dropped");
+    assert!(dropped.iter().all(Cell::get));
+}
+
+#[test]
+fn a_panic_survives_panicking_destructors() {
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        block_on(async {
+            scope(async |s| {
+                s.spawn(async {
+                    yield_now().await;
+                    panic!("child panicked");
+                });
+                let _bomb = PanicOnDrop("body dropped");
+                std::future::pending::<()>().await;
+            })
+            .await
+        })
+    }));
+    let payload = result.unwrap_err();
+    assert_eq!(payload.downcast_ref::<&str>(), Some(&"child panicked"));
+}
+
+#[test]
+fn stale_wakers_after_slot_reuse() {
+    block_on(async {
+        let stash = Cell::new(None);
+        scope(async |s| {
+            // The first task leaves its waker behind, and its slot is reused.
+            s.spawn(poll_fn(|cx| {
+                stash.set(Some(cx.waker().clone()));
+                Poll::Ready(())
+            }))
+            .await;
+            let second = s.spawn(async {
+                yield_now().await;
+                2
+            });
+            stash.take().unwrap().wake();
+            assert_eq!(second.await, 2);
+        })
+        .await;
+        // And after the scope is gone.
+        if let Some(waker) = stash.take() {
+            waker.wake();
+        }
+    })
+}
+
+#[test]
+fn is_finished() {
+    block_on(async {
+        let result: Result<(), ()> = try_scope(async |s| {
+            let ok = s.spawn(async {});
+            let failed = s.try_spawn(async { Err::<(), _>(()) });
+            let pending = s.spawn(yield_now());
+            assert!(!ok.is_finished() && !failed.is_finished() && !pending.is_finished());
+            yield_now().await;
+            assert!(ok.is_finished() && failed.is_finished());
+            Ok(())
+        })
+        .await;
+        assert_eq!(result, Err(()));
+    })
+}
+
+#[test]
+fn try_spawn_in_a_plain_scope() {
+    block_on(async {
+        let value = scope(async |s| s.try_spawn(async { Ok(1) }).await).await;
+        assert_eq!(value, 1);
+    })
+}
+
+#[test]
+fn scope_inside_a_spawned_task() {
+    block_on(async {
+        let value = compio_runtime::spawn(async {
+            let data = [1, 2, 3];
+            scope(async |s| {
+                let sum = s.spawn(async { data.iter().sum::<i32>() });
+                sum.await
+            })
+            .await
+        })
+        .await
+        .unwrap();
+        assert_eq!(value, 6);
+    })
+}
+
+#[test]
+fn woken_from_another_thread() {
+    block_on(async {
+        let value = scope(async |s| {
+            s.spawn(compio_runtime::spawn_blocking(|| {
+                std::thread::sleep(Duration::from_millis(10));
+                7
+            }))
+            .await
+            .unwrap()
+        })
+        .await;
+        assert_eq!(value, 7);
+    })
+}
+
+#[test]
+fn waker_dropped_on_another_thread() {
+    // Under LeakSanitizer: the clone mustn't keep the scope's token, and with
+    // it the runtime, alive.
+    block_on(async {
+        scope(async |s| {
+            s.spawn(poll_fn(|cx| {
+                let waker = cx.waker().clone();
+                std::thread::spawn(move || drop(waker)).join().unwrap();
+                Poll::Ready(())
+            }))
+            .await;
+        })
+        .await;
+    })
+}
+
+#[test]
+fn nested_try_scope_errors_propagate() {
+    block_on(async {
+        let outer_cancelled = Cell::new(false);
+        let result: Result<(), &str> = try_scope(async |s| {
+            s.spawn(async {
+                s.cancel_token().wait().await;
+                outer_cancelled.set(true);
+            });
+            s.try_spawn(try_scope(async |inner| {
+                inner.try_spawn(async { Err::<(), _>("inner") });
+                Ok(())
+            }));
+            Ok(())
+        })
+        .await;
+        assert_eq!(result, Err("inner"));
+        assert!(outer_cancelled.get());
     })
 }
 

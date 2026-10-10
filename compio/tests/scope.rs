@@ -3,7 +3,7 @@ use std::{cell::Cell, io, net::Ipv4Addr, time::Duration};
 use compio::{
     buf::BufResult,
     driver::ErrorExt,
-    io::AsyncRead,
+    io::{AsyncRead, AsyncWriteExt},
     net::{TcpListener, TcpStream},
     runtime::{CancelToken, FutureExt, scope, try_scope},
     time::sleep,
@@ -131,4 +131,84 @@ async fn completed_io_is_unaffected() {
     .await;
 
     assert_eq!(&buf[..res.unwrap()], b"hello");
+}
+
+#[compio_macros::test]
+async fn inner_with_cancel_doesnt_shield_from_the_scope() {
+    let (mut a, _b) = tcp_pair().await;
+    let (mut c, _d) = tcp_pair().await;
+    let (a, c) = (&mut a, &mut c);
+    let own = CancelToken::new();
+
+    let scope = scope(async |s| {
+        let read = s.spawn(async move {
+            a.read(Vec::with_capacity(16))
+                .with_cancel(own.clone())
+                .await
+        });
+        // A nested scope polled with a token of its own still follows this one.
+        let nested = s.spawn(
+            scope(async move |inner| {
+                inner
+                    .spawn(async move { c.read(Vec::with_capacity(16)).await })
+                    .await
+            })
+            .with_cancel(CancelToken::new()),
+        );
+        sleep(Duration::from_millis(10)).await;
+        s.cancel();
+        (read.await, nested.await)
+    });
+    let (BufResult(res, _), BufResult(nested, _)) =
+        compio::time::timeout(Duration::from_secs(5), scope)
+            .await
+            .expect("the cancellation didn't reach the reads");
+
+    assert!(res.is_cancelled(), "{res:?}");
+    assert!(nested.is_cancelled(), "{nested:?}");
+}
+
+#[compio_macros::test]
+async fn reads_with_data_ready_fail_after_cancel() {
+    let (mut a, mut b) = tcp_pair().await;
+    b.write_all("hello").await.0.unwrap();
+    let a = &mut a;
+
+    let BufResult(res, buf) = scope(async |s| {
+        s.cancel();
+        s.spawn(async move { a.read(Vec::with_capacity(16)).await })
+            .await
+    })
+    .await;
+
+    assert!(res.is_cancelled(), "{res:?}");
+    assert_eq!(buf.capacity(), 16);
+}
+
+#[compio_macros::test]
+#[cfg(target_os = "linux")]
+async fn personality_reaches_tasks() {
+    use compio::driver::DriverType;
+
+    if compio::runtime::Runtime::with_current(|r| r.driver_type()) != DriverType::IoUring {
+        return;
+    }
+    let (_a, b) = tcp_pair().await;
+    let b = &b;
+
+    // No personality is registered with this id.
+    let res = scope(async |s| {
+        s.spawn(async move {
+            let mut b = b;
+            b.write_all("hello").await.0
+        })
+        .await
+    })
+    .with_personality(0x7ff0)
+    .await;
+
+    assert_eq!(
+        res.unwrap_err().raw_os_error(),
+        Some(nix::errno::Errno::EINVAL as i32)
+    );
 }
