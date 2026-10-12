@@ -53,7 +53,7 @@ libc = { workspace = true }
 cfg_aliases = { workspace = true }
 
 [dev-dependencies]
-asyncband = { workspace = true, features = ["blocking", "mpsc", "oneshot"] }
+asyncband = { workspace = true, features = ["blocking", "event", "mpsc", "oneshot"] }
 compio-dispatcher = { workspace = true }
 compio-driver = { workspace = true }
 compio-fs = { workspace = true }

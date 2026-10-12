@@ -20,10 +20,10 @@ targets = [
 
 [dependencies]
 slab = { workspace = true }
-synchrony = { workspace = true, features = ["async_flag"] }
 
 # Windows specific dependencies
 [target.'cfg(windows)'.dependencies]
+asyncband = { workspace = true, features = ["event"] }
 once_cell = { workspace = true }
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
@@ -32,6 +32,7 @@ windows-sys = { workspace = true, features = [
 
 # Unix specific dependencies
 [target.'cfg(unix)'.dependencies]
+synchrony = { workspace = true, features = ["async_flag"] }
 nix = { workspace = true, features = ["signal"] }
 
 [dev-dependencies]

@@ -1,5 +1,7 @@
+use std::sync::Arc;
+
+use asyncband::event::ManualResetEvent;
 use compio_quic::{ConnectionError, Endpoint, TransportConfig};
-use synchrony::unsync::async_flag::AsyncFlag;
 
 mod common;
 use common::{config_pair, subscribe};
@@ -20,11 +22,11 @@ async fn ip_blocking() {
     let client1_addr = client1.local_addr().unwrap();
     let client2 = Endpoint::client("127.0.0.1:0").await.unwrap();
 
-    let shutdown_flag = AsyncFlag::new();
-    let shutdown_handle = shutdown_flag.handle();
+    let shutdown_flag = Arc::new(ManualResetEvent::new());
+    let shutdown_handle = shutdown_flag.clone();
 
     let srv = compio_runtime::spawn(async move {
-        let wait_fut = shutdown_flag.wait().fuse();
+        let wait_fut = shutdown_flag.wait_owned().fuse();
         let mut wait_fut = std::pin::pin!(wait_fut);
         loop {
             let incoming = futures_util::select! {
@@ -54,7 +56,7 @@ async fn ip_blocking() {
         .await
         .unwrap();
 
-    shutdown_handle.notify();
+    shutdown_handle.set();
 
     srv.await.unwrap();
 

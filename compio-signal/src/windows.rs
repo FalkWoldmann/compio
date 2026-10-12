@@ -5,13 +5,13 @@ use std::sync::OnceLock;
 use std::{
     collections::HashMap,
     io,
-    sync::{LazyLock, Mutex},
+    sync::{Arc, LazyLock, Mutex},
 };
 
+use asyncband::event::ManualResetEvent;
 #[cfg(not(feature = "once_cell_try"))]
 use once_cell::sync::OnceCell as OnceLock;
 use slab::Slab;
-use synchrony::sync::async_flag::{AsyncFlag as Event, AsyncFlagHandle as EventHandle};
 use windows_sys::{
     Win32::System::Console::{
         CTRL_BREAK_EVENT, CTRL_C_EVENT, CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT,
@@ -20,7 +20,7 @@ use windows_sys::{
     core::BOOL,
 };
 
-static HANDLER: LazyLock<Mutex<HashMap<u32, Slab<EventHandle>>>> =
+static HANDLER: LazyLock<Mutex<HashMap<u32, Slab<Arc<ManualResetEvent>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 unsafe extern "system" fn ctrl_event_handler(ctrltype: u32) -> BOOL {
@@ -30,7 +30,7 @@ unsafe extern "system" fn ctrl_event_handler(ctrltype: u32) -> BOOL {
     {
         let handlers = std::mem::replace(handlers, Slab::new());
         for (_, handler) in handlers {
-            handler.notify();
+            handler.set();
         }
         return 1;
     }
@@ -47,9 +47,9 @@ fn init() -> io::Result<()> {
     }
 }
 
-fn register(ctrltype: u32, e: &Event) -> usize {
+fn register(ctrltype: u32, e: &Arc<ManualResetEvent>) -> usize {
     let mut handler = HANDLER.lock().unwrap();
-    let handle = e.handle();
+    let handle = e.clone();
     handler.entry(ctrltype).or_default().insert(handle)
 }
 
@@ -66,7 +66,7 @@ fn unregister(ctrltype: u32, key: usize) {
 #[derive(Debug)]
 struct CtrlEvent {
     ctrltype: u32,
-    event: Option<Event>,
+    event: Arc<ManualResetEvent>,
     handler_key: usize,
 }
 
@@ -74,21 +74,17 @@ impl CtrlEvent {
     pub(crate) fn new(ctrltype: u32) -> io::Result<Self> {
         INIT.get_or_try_init(init)?;
 
-        let event = Event::new();
+        let event = Arc::new(ManualResetEvent::new());
         let handler_key = register(ctrltype, &event);
         Ok(Self {
             ctrltype,
-            event: Some(event),
+            event,
             handler_key,
         })
     }
 
-    pub async fn wait(mut self) {
-        self.event
-            .take()
-            .expect("event could not be None")
-            .wait()
-            .await
+    pub async fn wait(self) {
+        self.event.wait().await
     }
 }
 

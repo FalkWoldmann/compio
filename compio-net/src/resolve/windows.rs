@@ -5,14 +5,15 @@ use std::{
     mem::MaybeUninit,
     net::SocketAddr,
     ptr::{null, null_mut},
+    sync::Arc,
     task::Poll,
 };
 
+use asyncband::event::ManualResetEvent;
 use compio_driver::syscall;
 #[cfg(not(feature = "once_cell_try"))]
 use once_cell::sync::OnceCell as OnceLock;
 use socket2::SockAddr;
-use synchrony::sync::async_flag::{AsyncFlag as Event, AsyncFlagHandle as EventHandle};
 use widestring::U16CString;
 use windows_sys::Win32::{
     Foundation::{ERROR_IO_PENDING, GetLastError, HANDLE},
@@ -74,14 +75,14 @@ impl AsyncResolver {
         if let Some(overlapped) = unsafe { overlapped_ptr.as_mut() }
             && let Some(handle) = overlapped.handle.take()
         {
-            handle.notify();
+            handle.set();
         }
     }
 
     pub unsafe fn call(
         &mut self,
         hints: &ADDRINFOEXW,
-        handle: EventHandle,
+        handle: Arc<ManualResetEvent>,
     ) -> Poll<io::Result<()>> {
         self.overlapped.handle = Some(handle);
         let res = unsafe {
@@ -156,7 +157,7 @@ impl Drop for AsyncResolver {
 #[repr(C)]
 struct GAIOverlapped {
     base: OVERLAPPED,
-    handle: Option<EventHandle>,
+    handle: Option<Arc<ManualResetEvent>>,
 }
 
 impl GAIOverlapped {
@@ -178,8 +179,8 @@ pub async fn resolve_sock_addrs(
     hints.ai_socktype = SOCK_STREAM;
     hints.ai_protocol = IPPROTO_TCP;
 
-    let event = Event::new();
-    let handle = event.handle();
+    let event = Arc::new(ManualResetEvent::new());
+    let handle = event.clone();
     match unsafe { resolver.call(&hints, handle) } {
         Poll::Ready(res) => {
             res?;

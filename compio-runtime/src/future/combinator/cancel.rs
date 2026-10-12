@@ -5,10 +5,10 @@ use std::{
 
 use futures_util::{FutureExt, Stream, StreamExt};
 use pin_project_lite::pin_project;
-use synchrony::unsync::event::EventListener;
 
 use crate::{
     CancelToken,
+    cancel::CancelListener,
     future::Ext,
     waker::{ExtWaker, with_ext},
 };
@@ -41,7 +41,7 @@ pin_project! {
     /// cancel token is triggered, this will also be notified and complete
     /// with an error without further polling the inner future.
     pub struct WithCancelFailFast<F: ?Sized> {
-        listen: EventListener,
+        listen: CancelListener,
         #[pin]
         future: WithCancel<F>,
     }
