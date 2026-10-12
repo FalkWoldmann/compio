@@ -205,7 +205,15 @@ impl Executor {
 
         self.shared().drain_sync(queue);
 
-        for id in queue.iter_hot().take(self.config.max_interval as _) {
+        let mut last = None;
+        for _ in 0..self.config.max_interval {
+            let Some(id) = queue
+                .hot_head()
+                .filter(|id| last != Some(*id) && !queue.is_taken(*id))
+            else {
+                break;
+            };
+            last = Some(id);
             queue.make_cold(id);
             let task = queue.take(id).expect("Task was not reset back");
             let res = unsafe { task.run() };

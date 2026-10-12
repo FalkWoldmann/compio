@@ -2,10 +2,11 @@ use std::{
     cell::{Cell, RefCell},
     future::Future,
     pin::pin,
+    rc::Rc,
     task::{Context, Poll, Waker},
 };
 
-use compio_executor::{Executor, JoinError, JoinHandle};
+use compio_executor::{Executor, ExecutorConfig, JoinError, JoinHandle};
 
 std::thread_local! {
     static EXE: Executor = Executor::new();
@@ -288,4 +289,141 @@ fn test_num_alive_tasks() {
 
     exe.clear();
     assert_eq!(exe.num_alive_tasks(), 0);
+}
+
+#[test]
+fn test_tick_runs_task_spawned_by_last_task() {
+    setup_log();
+
+    let ran = Rc::new(Cell::new(false));
+    let inner_ran = ran.clone();
+    spawn(async move {
+        spawn(async move { inner_ran.set(true) }).detach();
+    })
+    .detach();
+
+    let has_hot = EXE.with(|exe| exe.tick());
+    assert!(ran.get());
+    assert!(!has_hot);
+}
+
+#[test]
+fn test_tick_runs_task_woken_by_last_task() {
+    setup_log();
+
+    let ready = Rc::new(Cell::new(false));
+    let waker = Rc::new(RefCell::new(None::<Waker>));
+
+    let (waiter_ready, waiter_waker) = (ready.clone(), waker.clone());
+    let waiter = spawn(std::future::poll_fn(move |cx| {
+        if waiter_ready.get() {
+            Poll::Ready(())
+        } else {
+            *waiter_waker.borrow_mut() = Some(cx.waker().clone());
+            Poll::Pending
+        }
+    }));
+    spawn(async move {
+        ready.set(true);
+        waker.borrow_mut().take().expect("waiter ran first").wake();
+    })
+    .detach();
+
+    let has_hot = EXE.with(|exe| exe.tick());
+    assert!(waiter.is_finished());
+    assert!(!has_hot);
+}
+
+#[test]
+fn test_tick_runs_lone_self_waking_task_once() {
+    setup_log();
+
+    let exe = Executor::new();
+    let polls = Rc::new(Cell::new(0));
+    let counter = polls.clone();
+    exe.spawn(async move {
+        loop {
+            counter.set(counter.get() + 1);
+            yield_now().await;
+        }
+    })
+    .detach();
+
+    assert!(exe.tick());
+    assert_eq!(polls.get(), 1);
+
+    exe.clear();
+}
+
+#[test]
+fn test_tick_stops_at_max_interval() {
+    setup_log();
+
+    let exe = Executor::with_config(ExecutorConfig {
+        max_interval: 8,
+        ..Default::default()
+    });
+    let polls = Rc::new(Cell::new(0));
+    for _ in 0..2 {
+        let counter = polls.clone();
+        exe.spawn(async move {
+            loop {
+                counter.set(counter.get() + 1);
+                yield_now().await;
+            }
+        })
+        .detach();
+    }
+
+    assert!(exe.tick());
+    assert_eq!(polls.get(), 8);
+
+    exe.clear();
+}
+
+#[test]
+fn test_tick_stops_at_max_interval_for_spawn_chain() {
+    setup_log();
+
+    fn chain(exe: Rc<Executor>, polls: Rc<Cell<u32>>) {
+        let next = exe.clone();
+        exe.spawn(async move {
+            polls.set(polls.get() + 1);
+            chain(next.clone(), polls);
+        })
+        .detach();
+    }
+
+    let exe = Rc::new(Executor::with_config(ExecutorConfig {
+        max_interval: 8,
+        ..Default::default()
+    }));
+    let polls = Rc::new(Cell::new(0));
+    chain(exe.clone(), polls.clone());
+
+    assert!(exe.tick());
+    assert_eq!(polls.get(), 8);
+
+    exe.clear();
+}
+
+#[test]
+fn test_nested_tick_wakes_running_task() {
+    setup_log();
+
+    let handle = spawn(async {
+        let mut child = pin!(spawn(async {}));
+        std::future::poll_fn(|cx| {
+            if child.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(());
+            }
+            EXE.with(|exe| exe.tick());
+            child.as_mut().poll(cx).map(drop)
+        })
+        .await
+    });
+
+    EXE.with(|exe| exe.tick());
+    let res = pin!(handle).poll(&mut Context::from_waker(Waker::noop()));
+    assert!(matches!(res, Poll::Ready(Ok(()))));
 }
