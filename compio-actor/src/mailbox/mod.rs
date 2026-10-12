@@ -60,8 +60,13 @@ impl<A: Actor> MailboxInner<A> {
         if self.stopping.swap(true, Ordering::AcqRel) {
             return false;
         }
+        // Check before signalling: once the stop is set, the actor may exit and
+        // drop its receiver before this returns.
+        if self.control.closed.load(Ordering::Acquire) {
+            return false;
+        }
         self.control.stop.set();
-        !self.control.closed.load(Ordering::Acquire)
+        true
     }
 
     fn begin_stop(&self) {
