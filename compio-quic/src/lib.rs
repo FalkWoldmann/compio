@@ -46,6 +46,16 @@ pub(crate) use synchrony::sync;
 #[cfg(not(feature = "sync"))]
 pub(crate) use synchrony::unsync as sync;
 
+/// Turns a channel receiver into a stream that ends once all senders are
+/// dropped.
+pub(crate) fn recv_stream<T>(
+    rx: &asyncband::mpmc::UnboundedReceiver<T>,
+) -> impl futures_util::stream::FusedStream<Item = T> + '_ {
+    futures_util::StreamExt::fuse(futures_util::stream::unfold(rx, |rx| async move {
+        rx.recv().await.ok().map(|value| (value, rx))
+    }))
+}
+
 pub(crate) use crate::{
     connection::{ConnectionEvent, ConnectionInner},
     endpoint::EndpointRef,

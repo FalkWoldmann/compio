@@ -24,7 +24,7 @@ cfg_select! {
     }
 }
 
-use flume::{Receiver, Sender};
+use asyncband::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use io_uring::{
     EnterFlags, IoUring,
     cqueue::more,
@@ -65,8 +65,8 @@ pub(crate) struct Driver {
     inner: ManuallyDrop<IoUring<SEntry, CEntry>>,
     notifier: Notifier,
     pool: AsyncifyPool,
-    completed_tx: Sender<Entry>,
-    completed_rx: Receiver<Entry>,
+    completed_tx: UnboundedSender<Entry>,
+    completed_rx: UnboundedReceiver<Entry>,
     flags: DriverFlags,
     /// Keys leaked via `into_raw()` into io_uring user_data, freed on drop.
     in_flight: SlotMap<DefaultKey, usize>,
@@ -122,7 +122,7 @@ impl Driver {
             submitter.register_eventfd(fd)?;
         }
 
-        let (completed_tx, completed_rx) = flume::unbounded();
+        let (completed_tx, completed_rx) = mpsc::unbounded();
 
         // NO_IOWAIT needs kernel 6.15+ (the IORING_FEAT_NO_IOWAIT feature bit)
         // and is meaningless under SQPOLL: the polling thread, not an `enter`

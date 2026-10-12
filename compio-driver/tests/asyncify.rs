@@ -77,3 +77,43 @@ fn small_pool() {
     wait_for(&mut driver, a).unwrap();
     wait_for(&mut driver, b).unwrap();
 }
+
+#[test]
+fn pool_timeout_race() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    use compio_driver::AsyncifyPool;
+
+    // A tiny receive timeout makes idle workers exit constantly, racing with
+    // dispatches that claim them.
+    let pool = AsyncifyPool::new(4, Duration::from_micros(1));
+    let done = Arc::new(AtomicUsize::new(0));
+    const TASKS: usize = 20_000;
+    for i in 0..TASKS {
+        // Let workers go idle and time out between bursts.
+        if i % 64 == 0 {
+            std::thread::sleep(Duration::from_micros(200));
+        }
+        let mut f = {
+            let done = done.clone();
+            move || {
+                done.fetch_add(1, Ordering::Relaxed);
+            }
+        };
+        while let Err(e) = pool.dispatch(f) {
+            f = e.0;
+            std::thread::yield_now();
+        }
+    }
+    let start = std::time::Instant::now();
+    while done.load(Ordering::Relaxed) < TASKS {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "lost dispatched tasks"
+        );
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}

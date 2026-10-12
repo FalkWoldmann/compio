@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use flume::{Receiver, Sender};
+use asyncband::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use polling::{Event, Events, Poller};
 
 mod op;
@@ -127,8 +127,11 @@ pub(crate) struct Driver {
     notify: Arc<Notify>,
     registry: HashMap<RawFd, FdQueue>,
     pool: AsyncifyPool,
-    completed_tx: Sender<Entry>,
-    completed_rx: Receiver<Entry>,
+    completed_tx: UnboundedSender<Entry>,
+    completed_rx: UnboundedReceiver<Entry>,
+    /// An entry taken from `completed_rx` to check for completions, not yet
+    /// notified.
+    completed_peek: Option<Entry>,
 }
 
 impl Driver {
@@ -143,7 +146,7 @@ impl Driver {
         };
         let poll = Poller::new()?;
         let notify = Arc::new(Notify::new(poll));
-        let (completed_tx, completed_rx) = flume::unbounded();
+        let (completed_tx, completed_rx) = mpsc::unbounded();
 
         Ok(Self {
             events,
@@ -152,6 +155,7 @@ impl Driver {
             pool: builder.create_or_get_thread_pool(),
             completed_tx,
             completed_rx,
+            completed_peek: None,
         })
     }
 
@@ -398,6 +402,10 @@ impl Driver {
 
     fn poll_completed(&mut self) -> bool {
         let mut ret = false;
+        if let Some(entry) = self.completed_peek.take() {
+            entry.notify();
+            ret = true;
+        }
         while let Ok(entry) = self.completed_rx.try_recv() {
             entry.notify();
             ret = true;
@@ -446,7 +454,14 @@ impl Driver {
     pub fn poll(&mut self, mut timeout: Option<Duration>) -> io::Result<()> {
         instrument!(compio_log::Level::TRACE, "poll", ?timeout);
         let timeout_is_some = timeout.is_some();
-        let has_completed = !self.completed_rx.is_empty();
+        let has_completed = self.completed_peek.is_some()
+            || match self.completed_rx.try_recv() {
+                Ok(entry) => {
+                    self.completed_peek = Some(entry);
+                    true
+                }
+                Err(_) => false,
+            };
         let need_wait = !self.notify.reset();
         if !need_wait || has_completed {
             timeout = Some(Duration::ZERO);

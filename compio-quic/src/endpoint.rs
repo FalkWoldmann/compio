@@ -13,13 +13,13 @@ use std::{
     time::Instant,
 };
 
+use asyncband::mpmc::{UnboundedReceiver as Receiver, UnboundedSender as Sender, unbounded};
 use compio_buf::{BufResult, bytes::Bytes};
 use compio_log::{Instrument, error};
 #[cfg(rustls)]
 use compio_net::ToSocketAddrsAsync;
 use compio_net::UdpSocket;
 use compio_runtime::{JoinHandle, SpawnMeta};
-use flume::{Receiver, Sender, unbounded};
 use futures_util::{FutureExt, StreamExt, future, select, task::AtomicWaker};
 use quinn_proto::{
     ClientConfig, ConnectError, ConnectionError, ConnectionHandle, DatagramEvent, EndpointConfig,
@@ -28,7 +28,7 @@ use quinn_proto::{
 use rustc_hash::FxHashMap as HashMap;
 
 use crate::{
-    Connecting, ConnectionEvent, Incoming, RecvMeta, Socket,
+    Connecting, ConnectionEvent, Incoming, RecvMeta, Socket, recv_stream,
     sync::{mutex_blocking::Mutex, shared::Shared},
 };
 
@@ -317,7 +317,7 @@ impl EndpointInner {
                 .fuse()
         );
 
-        let mut event_stream = self.events.1.stream().ready_chunks(100);
+        let mut event_stream = pin!(recv_stream(&self.events.1).ready_chunks(100));
 
         loop {
             let mut state = select! {

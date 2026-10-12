@@ -4,6 +4,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use asyncband::blocking::FutureExt as _;
 use compio_buf::bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput};
 use futures_util::{StreamExt, stream::FuturesUnordered};
@@ -54,7 +55,7 @@ fn start_compio_quic_server(
     cert: rustls::pki_types::CertificateDer<'static>,
     key_der: rustls::pki_types::PrivateKeyDer<'static>,
 ) -> SocketAddr {
-    let (tx, rx) = flume::bounded(0);
+    let (tx, rx) = asyncband::oneshot::channel();
 
     std::thread::spawn(move || {
         compio_runtime::Runtime::new().unwrap().block_on(async {
@@ -72,14 +73,14 @@ fn start_compio_quic_server(
         });
     });
 
-    rx.recv().unwrap()
+    rx.block_on().unwrap()
 }
 
 fn start_quinn_server(
     cert: rustls::pki_types::CertificateDer<'static>,
     key_der: rustls::pki_types::PrivateKeyDer<'static>,
 ) -> SocketAddr {
-    let (tx, rx) = flume::bounded(0);
+    let (tx, rx) = asyncband::oneshot::channel();
 
     std::thread::spawn(move || {
         tokio::runtime::Builder::new_current_thread()
@@ -101,7 +102,7 @@ fn start_quinn_server(
             });
     });
 
-    rx.recv().unwrap()
+    rx.block_on().unwrap()
 }
 
 async fn compio_quic_echo_client(

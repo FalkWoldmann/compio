@@ -72,7 +72,9 @@ pub struct Reply<R: Message>(oneshot::Sender<R>);
 impl<R: Message> Reply<R> {
     /// Answers the call, returning the response if the caller stopped waiting.
     pub fn reply(self, response: R) -> Result<(), R> {
-        self.0.send(response).map_err(oneshot::SendError::into_inner)
+        self.0
+            .send(response)
+            .map_err(oneshot::SendError::into_inner)
     }
 }
 

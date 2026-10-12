@@ -255,7 +255,7 @@ async fn two_datagram_readers() {
         async { endpoint.wait_incoming().await.unwrap().await.unwrap() },
     );
 
-    let (tx, rx) = flume::bounded::<()>(1);
+    let (tx, mut rx) = asyncband::mpsc::bounded::<()>(1);
 
     let (a, b, _) = join!(
         async {
@@ -270,7 +270,7 @@ async fn two_datagram_readers() {
         },
         async {
             conn2.send_datagram(MSG1.into()).unwrap();
-            rx.recv_async().await.unwrap();
+            rx.recv().await.unwrap();
             conn2.send_datagram_wait(MSG2.into()).await.unwrap();
         }
     );

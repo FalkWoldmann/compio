@@ -3,7 +3,7 @@ use std::{
     time::Duration,
 };
 
-use flume::{Receiver, Sender};
+use asyncband::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use windows_sys::Win32::{Foundation::ERROR_OPERATION_ABORTED, System::IO::OVERLAPPED};
 
 use crate::{
@@ -35,8 +35,8 @@ pub(crate) struct Driver {
     notify: Arc<Notify>,
     waits: HashMap<usize, wait::Wait>,
     pool: AsyncifyPool,
-    completed_tx: Sender<Entry>,
-    completed_rx: Receiver<Entry>,
+    completed_tx: UnboundedSender<Entry>,
+    completed_rx: UnboundedReceiver<Entry>,
     _local_marker: PhantomData<ErasedKey>,
 }
 
@@ -48,7 +48,7 @@ impl Driver {
         let driver = port.as_raw_handle() as _;
         let overlapped = Overlapped::new(driver);
         let notify = Arc::new(Notify::new(port, overlapped));
-        let (completed_tx, completed_rx) = flume::unbounded();
+        let (completed_tx, completed_rx) = mpsc::unbounded();
 
         Ok(Self {
             notify,

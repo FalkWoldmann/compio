@@ -7,10 +7,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use asyncband::mpmc::{UnboundedReceiver as Receiver, UnboundedSender as Sender};
 use compio_buf::bytes::Bytes;
 use compio_log::Instrument;
 use compio_runtime::{JoinHandle, SpawnMeta};
-use flume::{Receiver, Sender};
 use futures_util::{
     FutureExt, StreamExt,
     future::{self, Fuse, FusedFuture, LocalBoxFuture},
@@ -26,7 +26,7 @@ use rustc_hash::FxHashMap as HashMap;
 use thiserror::Error;
 
 use crate::{
-    RecvStream, SendStream, Socket,
+    RecvStream, SendStream, Socket, recv_stream,
     sync::{
         mutex_blocking::{Mutex, MutexGuard},
         shared::Shared,
@@ -195,7 +195,7 @@ impl ConnectionInner {
         .fuse();
 
         let mut timer = Timer::new();
-        let mut event_stream = self.events_rx.stream().ready_chunks(100);
+        let mut event_stream = pin!(recv_stream(&self.events_rx).ready_chunks(100));
         let mut send_buf = Some(Vec::with_capacity(self.state().conn.current_mtu() as usize));
         let mut transmit_fut = pin!(Fuse::terminated());
 

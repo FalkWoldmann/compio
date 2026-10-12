@@ -15,12 +15,12 @@ use std::{
     },
 };
 
+use asyncband::mpsc::{BoundedSender, TrySendError};
 pub(crate) use call::call_with;
 #[doc(inline)]
 pub use call::{Call, Reply};
 #[doc(inline)]
 pub use error::{CallError, DeliverError};
-use asyncband::mpsc::{BoundedSender, TrySendError};
 pub(crate) use name::Name;
 use receiver::Control;
 pub(crate) use receiver::{MailboxEvent, Receiver, make_mailbox};

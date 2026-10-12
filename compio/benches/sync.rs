@@ -20,7 +20,10 @@ const BATCH: usize = 64;
 
 fn runtimes() -> Vec<(&'static str, Runtime)> {
     let mut rts = vec![];
-    for (name, ty) in [("io-uring", DriverType::IoUring), ("poll", DriverType::Poll)] {
+    for (name, ty) in [
+        ("io-uring", DriverType::IoUring),
+        ("poll", DriverType::Poll),
+    ] {
         let mut proactor = ProactorBuilder::new();
         proactor.driver_type(ty);
         let rt = Runtime::builder().with_proactor(proactor).build().unwrap();
@@ -57,8 +60,13 @@ fn dispatcher(c: &mut Criterion) {
         .unwrap();
     group.throughput(Throughput::Elements(1));
     group.bench_function("single", |b| {
-        b.to_async(&rt)
-            .iter(|| async { dispatcher.dispatch(|| async { 1usize }).unwrap().await.unwrap() })
+        b.to_async(&rt).iter(|| async {
+            dispatcher
+                .dispatch(|| async { 1usize })
+                .unwrap()
+                .await
+                .unwrap()
+        })
     });
     group.throughput(Throughput::Elements(BATCH as u64));
     group.bench_function("batch", |b| {
@@ -91,7 +99,12 @@ impl Actor for Counter {
 }
 
 impl Handler<Add> for Counter {
-    async fn handle(&self, _: &Mailbox<Self>, Add(v): Add, s: &mut usize) -> Result<(), Infallible> {
+    async fn handle(
+        &self,
+        _: &Mailbox<Self>,
+        Add(v): Add,
+        s: &mut usize,
+    ) -> Result<(), Infallible> {
         *s += v;
         Ok(())
     }

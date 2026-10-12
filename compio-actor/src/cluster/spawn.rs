@@ -262,6 +262,6 @@ impl Cluster {
             Err(_) => return SpawnFuture::ready(Err(SpawnError::Unavailable)),
         };
 
-        SpawnFuture::pending(mailbox, result.into_future(), started_rx.into_future())
+        SpawnFuture::pending(mailbox, result, started_rx.into_future())
     }
 }

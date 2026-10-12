@@ -9,13 +9,13 @@ use std::{
     time::Duration,
 };
 
+use asyncband::oneshot;
 use compio_actor::{
     Actor, ActorExit, Call, Cluster, Handler, Mailbox,
     mailbox::DeliverError,
     process_group::{ProcessGroup, Strategy},
 };
 use compio_dispatcher::Dispatcher;
-use asyncband::oneshot;
 
 fn cluster() -> Cluster {
     let dispatcher = Dispatcher::builder()

@@ -35,7 +35,7 @@ h3 = { version = "0.0.8", optional = true }
 h3-datagram = { version = "0.0.2", optional = true }
 
 # Utils
-flume = { workspace = true, default-features = false, features = ["async"] }
+asyncband = { workspace = true, features = ["mpmc"] }
 futures-util = { workspace = true }
 thiserror = { workspace = true }
 rustc-hash = "2.0.0"
@@ -53,6 +53,7 @@ libc = { workspace = true }
 cfg_aliases = { workspace = true }
 
 [dev-dependencies]
+asyncband = { workspace = true, features = ["blocking", "mpsc", "oneshot"] }
 compio-dispatcher = { workspace = true }
 compio-driver = { workspace = true }
 compio-fs = { workspace = true }

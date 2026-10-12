@@ -7,7 +7,10 @@ use std::{
     time::Duration,
 };
 
-use flume::{Receiver, Sender, TrySendError, bounded};
+use asyncband::{
+    blocking::FutureExt,
+    mpmc::{UnboundedReceiver, UnboundedSender, unbounded},
+};
 
 /// An error that may be emitted when all worker threads are busy.
 ///
@@ -67,16 +70,44 @@ impl Drop for CounterGuard {
     }
 }
 
+/// Takes one unclaimed idle worker out of `idle`, returning whether there was
+/// one.
+fn claim_idle(idle: &AtomicUsize) -> bool {
+    let mut n = idle.load(Ordering::Acquire);
+    while n > 0 {
+        match idle.compare_exchange_weak(n, n - 1, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => return true,
+            Err(actual) => n = actual,
+        }
+    }
+    false
+}
+
+/// A worker starts claimed: it was spawned for a dispatchable that is sent
+/// right after. After running a dispatchable, it becomes idle and claimable
+/// again. Every claim is followed by exactly one send, so a claimed worker
+/// always has a dispatchable to receive.
 fn worker(
-    receiver: Receiver<BoxedDispatchable>,
+    receiver: UnboundedReceiver<BoxedDispatchable>,
     counter: Arc<AtomicUsize>,
+    idle: Arc<AtomicUsize>,
     timeout: Duration,
 ) -> impl FnOnce() {
     move || {
         counter.fetch_add(1, Ordering::AcqRel);
         let _guard = CounterGuard(counter);
-        while let Ok(f) = receiver.recv_timeout(timeout) {
-            f.run()
+        loop {
+            match receiver.recv().wait_timeout(timeout) {
+                Some(Ok(f)) => {
+                    f.run();
+                    idle.fetch_add(1, Ordering::AcqRel);
+                }
+                Some(Err(_)) => break,
+                // Exit only if no dispatcher has claimed this worker meanwhile;
+                // otherwise a dispatchable is on its way.
+                None if claim_idle(&idle) => break,
+                None => {}
+            }
         }
     }
 }
@@ -84,9 +115,10 @@ fn worker(
 /// A thread pool to perform blocking operations in other threads.
 #[derive(Debug, Clone)]
 pub struct AsyncifyPool {
-    sender: Sender<BoxedDispatchable>,
-    receiver: Receiver<BoxedDispatchable>,
+    sender: UnboundedSender<BoxedDispatchable>,
+    receiver: UnboundedReceiver<BoxedDispatchable>,
     counter: Arc<AtomicUsize>,
+    idle: Arc<AtomicUsize>,
     thread_limit: usize,
     recv_timeout: Duration,
 }
@@ -95,11 +127,12 @@ impl AsyncifyPool {
     /// Create [`AsyncifyPool`] with thread number limit and channel receive
     /// timeout.
     pub fn new(thread_limit: usize, recv_timeout: Duration) -> Self {
-        let (sender, receiver) = bounded(0);
+        let (sender, receiver) = unbounded();
         Self {
             sender,
             receiver,
             counter: Arc::new(AtomicUsize::new(0)),
+            idle: Arc::new(AtomicUsize::new(0)),
             thread_limit,
             recv_timeout,
         }
@@ -110,31 +143,22 @@ impl AsyncifyPool {
     /// limit has been reached, it will return an error with the original
     /// dispatchable.
     pub fn dispatch<D: Dispatchable>(&self, f: D) -> Result<(), DispatchError<D>> {
-        match self.sender.try_send(Box::new(f) as BoxedDispatchable) {
-            Ok(_) => Ok(()),
-            Err(e) => match e {
-                TrySendError::Full(f) => {
-                    if self.thread_limit == 0 {
-                        panic!("the thread pool is needed but no worker thread is running");
-                    } else if self.counter.load(Ordering::Acquire) >= self.thread_limit {
-                        // SAFETY: we can ensure the type
-                        Err(DispatchError(*unsafe {
-                            Box::from_raw(Box::into_raw(f).cast())
-                        }))
-                    } else {
-                        std::thread::spawn(worker(
-                            self.receiver.clone(),
-                            self.counter.clone(),
-                            self.recv_timeout,
-                        ));
-                        self.sender.send(f).expect("the channel should not be full");
-                        Ok(())
-                    }
-                }
-                TrySendError::Disconnected(_) => {
-                    unreachable!("receiver should not all disconnected")
-                }
-            },
+        if !claim_idle(&self.idle) {
+            if self.thread_limit == 0 {
+                panic!("the thread pool is needed but no worker thread is running");
+            } else if self.counter.load(Ordering::Acquire) >= self.thread_limit {
+                return Err(DispatchError(f));
+            }
+            std::thread::spawn(worker(
+                self.receiver.clone(),
+                self.counter.clone(),
+                self.idle.clone(),
+                self.recv_timeout,
+            ));
         }
+        if self.sender.send(Box::new(f) as BoxedDispatchable).is_err() {
+            unreachable!("receiver should not all disconnected")
+        }
+        Ok(())
     }
 }

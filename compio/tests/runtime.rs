@@ -150,7 +150,11 @@ async fn arena() {
 #[compio_macros::test]
 async fn wake_cross_thread() {
     let (tx, rx) = asyncband::oneshot::channel::<()>();
-    let thread = std::thread::spawn(move || compio::runtime::Runtime::new().unwrap().block_on(async move { rx.await }));
+    let thread = std::thread::spawn(move || {
+        compio::runtime::Runtime::new()
+            .unwrap()
+            .block_on(async move { rx.await })
+    });
     // Sleep and wait for the waker passed into the channel.
     std::thread::sleep(Duration::from_secs(1));
     tx.send(()).unwrap();

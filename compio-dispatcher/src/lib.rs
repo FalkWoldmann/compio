@@ -19,11 +19,11 @@ use std::{
     thread::{JoinHandle, available_parallelism},
 };
 
-use compio_driver::{AsyncifyPool, DispatchError, Dispatchable, ProactorBuilder};
-use compio_runtime::{JoinHandle as CompioJoinHandle, Runtime, SpawnMeta};
 use asyncband::mpmc::{UnboundedSender, unbounded};
 /// The one-shot channel used to deliver dispatched results.
 pub use asyncband::oneshot;
+use compio_driver::{AsyncifyPool, DispatchError, Dispatchable, ProactorBuilder};
+use compio_runtime::{JoinHandle as CompioJoinHandle, Runtime, SpawnMeta};
 
 /// A closure to spawn, and the [`SpawnMeta`] of the `dispatch` call it came
 /// from.
@@ -43,9 +43,9 @@ struct Concrete<F, R> {
 }
 
 impl<F, R> Concrete<F, R> {
-    pub fn new(func: F) -> (Self, oneshot::Receiver<R>) {
+    pub fn new(func: F) -> (Self, oneshot::Recv<R>) {
         let (tx, rx) = oneshot::channel();
-        (Self { callback: tx, func }, rx)
+        (Self { callback: tx, func }, rx.into_future())
     }
 }
 
@@ -137,8 +137,7 @@ impl Dispatcher {
                             .expect("cannot create compio runtime")
                             .block_on_at(
                                 async move {
-                                    while let Ok(Spawning { task: f, meta }) =
-                                        receiver.recv().await
+                                    while let Ok(Spawning { task: f, meta }) = receiver.recv().await
                                     {
                                         let task = Runtime::with_current(|rt| f.spawn(rt, meta));
                                         if concurrent {
@@ -184,7 +183,7 @@ impl Dispatcher {
     /// If all threads have panicked, this method will return an error with the
     /// sent closure.
     #[track_caller]
-    pub fn dispatch<Fn, Fut, R>(&self, f: Fn) -> Result<oneshot::Receiver<R>, DispatchError<Fn>>
+    pub fn dispatch<Fn, Fut, R>(&self, f: Fn) -> Result<oneshot::Recv<R>, DispatchError<Fn>>
     where
         Fn: (FnOnce() -> Fut) + Send + 'static,
         Fut: Future<Output = R> + 'static,
@@ -221,7 +220,7 @@ impl Dispatcher {
     /// return an error with the original closure. The limit can be configured
     /// with [`DispatcherBuilder::proactor_builder`] and
     /// [`ProactorBuilder::thread_pool_limit`].
-    pub fn dispatch_blocking<Fn, R>(&self, f: Fn) -> Result<oneshot::Receiver<R>, DispatchError<Fn>>
+    pub fn dispatch_blocking<Fn, R>(&self, f: Fn) -> Result<oneshot::Recv<R>, DispatchError<Fn>>
     where
         Fn: FnOnce() -> R + Send + 'static,
         R: Send + 'static,

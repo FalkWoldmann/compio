@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use asyncband::{mpsc, oneshot};
 use compio_runtime::Runtime;
 
 /// Number of concurrent tasks to be sent between the two threads
@@ -21,8 +22,8 @@ struct Request {
 
 fn spawn_peer(
     name: &'static str,
-    inbox: flume::Receiver<Request>,
-    outbox: flume::Sender<Request>,
+    mut inbox: mpsc::UnboundedReceiver<Request>,
+    outbox: mpsc::UnboundedSender<Request>,
     done: Arc<AtomicUsize>,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
@@ -33,7 +34,7 @@ fn spawn_peer(
             rt.block_on(async move {
                 // Handle requests from the peer
                 let worker = compio_runtime::spawn(async move {
-                    while let Ok(req) = inbox.recv_async().await {
+                    while let Ok(req) = inbox.recv().await {
                         compio_runtime::spawn(async move {
                             let _ = req.reply.send(());
                         })
@@ -75,8 +76,8 @@ fn spawn_peer(
 fn cross_thread_channel_rpc_does_not_livelock() {
     // chan_a: peer A is the worker (a_rx); peer B sends into it (a_tx).
     // chan_b: peer B is the worker (b_rx); peer A sends into it (b_tx).
-    let (a_tx, a_rx) = flume::unbounded::<Request>();
-    let (b_tx, b_rx) = flume::unbounded::<Request>();
+    let (a_tx, a_rx) = mpsc::unbounded::<Request>();
+    let (b_tx, b_rx) = mpsc::unbounded::<Request>();
 
     let done = Arc::new(AtomicUsize::new(0));
 

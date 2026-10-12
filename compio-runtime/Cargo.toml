@@ -47,8 +47,7 @@ rustix = { workspace = true }
 rustix = { workspace = true, features = ["thread"] }
 
 [dev-dependencies]
-flume = { workspace = true, features = ["async"] }
-oneshot = { version = "0.2.1", features = ["async", "std"] }
+asyncband = { workspace = true, features = ["mpsc", "oneshot"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 windows-sys = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }
