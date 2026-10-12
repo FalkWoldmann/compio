@@ -162,6 +162,33 @@ fn cancel(c: &mut Criterion) {
             std::future::ready(1usize).with_cancel(token).await
         })
     });
+    group.bench_function("fail_fast_ready", |b| {
+        b.to_async(&rt).iter(|| async {
+            let token = CancelToken::new();
+            std::future::ready(1usize)
+                .with_cancel(token)
+                .fail_fast()
+                .await
+                .unwrap()
+        })
+    });
+    group.bench_function("fail_fast_cancel_pending", |b| {
+        b.to_async(&rt).iter(|| async {
+            let token = CancelToken::new();
+            let mut fut = std::pin::pin!(
+                std::future::pending::<()>()
+                    .with_cancel(token.clone())
+                    .fail_fast()
+            );
+            std::future::poll_fn(|cx| {
+                assert!(fut.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            token.cancel();
+            fut.await.unwrap_err()
+        })
+    });
     group.bench_function("cancel_then_wait", |b| {
         b.to_async(&rt).iter(|| async {
             let token = CancelToken::new();
