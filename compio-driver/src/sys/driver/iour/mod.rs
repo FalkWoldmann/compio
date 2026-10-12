@@ -472,9 +472,10 @@ impl Driver {
             self.flags.remove(DriverFlags::NEED_PUSH_NOTIFIER);
         }
 
-        self.submit_auto(timeout, need_wait)?;
-
+        let res = self.submit_auto(timeout, need_wait);
         self.notifier.set_awake();
+        res?;
+
         self.poll_entries();
         self.notifier.set_awake();
 
