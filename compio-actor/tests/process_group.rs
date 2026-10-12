@@ -15,7 +15,7 @@ use compio_actor::{
     process_group::{ProcessGroup, Strategy},
 };
 use compio_dispatcher::Dispatcher;
-use futures_channel::oneshot;
+use asyncband::oneshot;
 
 fn cluster() -> Cluster {
     let dispatcher = Dispatcher::builder()

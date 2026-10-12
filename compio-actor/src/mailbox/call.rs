@@ -1,6 +1,6 @@
 use std::fmt;
 
-use futures_channel::oneshot;
+use asyncband::oneshot;
 
 use super::{Broker, CallError, DeliverError, Mailbox};
 use crate::{Actor, Handler, Message};
@@ -72,7 +72,7 @@ pub struct Reply<R: Message>(oneshot::Sender<R>);
 impl<R: Message> Reply<R> {
     /// Answers the call, returning the response if the caller stopped waiting.
     pub fn reply(self, response: R) -> Result<(), R> {
-        self.0.send(response)
+        self.0.send(response).map_err(oneshot::SendError::into_inner)
     }
 }
 

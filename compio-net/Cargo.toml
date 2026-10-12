@@ -48,7 +48,7 @@ libc = { workspace = true }
 [dev-dependencies]
 compio-macros = { workspace = true }
 compio-runtime = { workspace = true, features = ["time"] }
-futures-channel = { workspace = true }
+asyncband = { workspace = true, features = ["oneshot"] }
 tempfile = { workspace = true }
 
 [features]

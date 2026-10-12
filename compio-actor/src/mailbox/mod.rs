@@ -20,8 +20,9 @@ pub(crate) use call::call_with;
 pub use call::{Call, Reply};
 #[doc(inline)]
 pub use error::{CallError, DeliverError};
-use flume::{Sender, TrySendError};
+use asyncband::mpsc::{BoundedSender, TrySendError};
 pub(crate) use name::Name;
+use receiver::Control;
 pub(crate) use receiver::{MailboxEvent, Receiver, make_mailbox};
 
 use crate::{Actor, Handler, Message, actor::Delivering};
@@ -31,8 +32,8 @@ pub const DEFAULT_MAILBOX_CAPACITY: NonZeroUsize = NonZeroUsize::new(64).unwrap(
 
 struct MailboxInner<A: Actor> {
     name: Option<Name>,
-    messages: Sender<Delivering<A>>,
-    stop: Sender<()>,
+    messages: BoundedSender<Delivering<A>>,
+    control: Arc<Control>,
     stopping: AtomicBool,
     capacity: NonZeroUsize,
 }
@@ -59,7 +60,8 @@ impl<A: Actor> MailboxInner<A> {
         if self.stopping.swap(true, Ordering::AcqRel) {
             return false;
         }
-        self.stop.try_send(()).is_ok()
+        self.control.stop.set();
+        !self.control.closed.load(Ordering::Acquire)
     }
 
     fn begin_stop(&self) {
@@ -67,9 +69,7 @@ impl<A: Actor> MailboxInner<A> {
     }
 
     fn is_closed(&self) -> bool {
-        self.stopping.load(Ordering::Acquire)
-            || self.messages.is_disconnected()
-            || self.stop.is_disconnected()
+        self.stopping.load(Ordering::Acquire) || self.control.closed.load(Ordering::Acquire)
     }
 }
 
@@ -136,7 +136,6 @@ impl<A: Actor> fmt::Debug for Mailbox<A> {
         f.debug_struct("Mailbox")
             .field("name", &self.name())
             .field("capacity", &self.inner.capacity)
-            .field("queued", &self.inner.messages.len())
             .field("closed", &self.is_closed())
             .finish()
     }

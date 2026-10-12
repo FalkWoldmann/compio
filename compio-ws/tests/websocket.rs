@@ -1,6 +1,6 @@
 use compio_net::{TcpListener, TcpStream};
 use compio_ws::{accept_async, client_async};
-use futures_channel::oneshot;
+use asyncband::oneshot;
 use tungstenite::Message;
 
 #[compio_macros::test]

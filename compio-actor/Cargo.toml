@@ -12,8 +12,7 @@ repository = { workspace = true }
 [dependencies]
 compio-dispatcher = { workspace = true }
 
-flume = { workspace = true, features = ["async"] }
-futures-channel = { workspace = true }
+asyncband = { workspace = true, features = ["event", "mpsc", "oneshot"] }
 futures-util = { workspace = true }
 pin-project-lite = { workspace = true }
 scoped-tls = { workspace = true }

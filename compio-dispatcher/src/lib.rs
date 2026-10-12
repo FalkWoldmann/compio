@@ -21,8 +21,9 @@ use std::{
 
 use compio_driver::{AsyncifyPool, DispatchError, Dispatchable, ProactorBuilder};
 use compio_runtime::{JoinHandle as CompioJoinHandle, Runtime, SpawnMeta};
-use flume::{Sender, unbounded};
-use futures_channel::oneshot;
+use asyncband::mpmc::{UnboundedSender, unbounded};
+/// The one-shot channel used to deliver dispatched results.
+pub use asyncband::oneshot;
 
 /// A closure to spawn, and the [`SpawnMeta`] of the `dispatch` call it came
 /// from.
@@ -81,7 +82,7 @@ where
 /// The dispatcher. It manages the threads and dispatches the tasks.
 #[derive(Debug)]
 pub struct Dispatcher {
-    sender: Sender<Spawning>,
+    sender: UnboundedSender<Spawning>,
     threads: Vec<JoinHandle<()>>,
     pool: AsyncifyPool,
 }
@@ -137,7 +138,7 @@ impl Dispatcher {
                             .block_on_at(
                                 async move {
                                     while let Ok(Spawning { task: f, meta }) =
-                                        receiver.recv_async().await
+                                        receiver.recv().await
                                     {
                                         let task = Runtime::with_current(|rt| f.spawn(rt, meta));
                                         if concurrent {
@@ -200,8 +201,9 @@ impl Dispatcher {
             Err(err) => {
                 // SAFETY: We know the dispatchable we sent has type
                 // `Concrete<Fn, R>`
-                let recovered =
-                    unsafe { Box::from_raw(Box::into_raw(err.0.task) as *mut Concrete<Fn, R>) };
+                let recovered = unsafe {
+                    Box::from_raw(Box::into_raw(err.into_inner().task) as *mut Concrete<Fn, R>)
+                };
                 Err(DispatchError(recovered.func))
             }
         }

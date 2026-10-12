@@ -47,7 +47,7 @@ compio-macros = { workspace = true }
 
 console-subscriber = { workspace = true }
 criterion = { workspace = true, features = ["async_tokio"] }
-futures-channel = { workspace = true }
+asyncband = { workspace = true, features = ["oneshot"] }
 futures-executor = { workspace = true }
 futures-util = { workspace = true }
 rand = { workspace = true }

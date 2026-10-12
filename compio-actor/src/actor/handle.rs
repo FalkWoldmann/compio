@@ -6,7 +6,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use futures_channel::oneshot;
+use asyncband::oneshot;
 
 /// The observed result of an actor task.
 #[derive(Debug, PartialEq, Eq)]
@@ -31,7 +31,7 @@ impl Error for ActorHandleError {}
 
 /// A handle for observing an actor running in the cluster.
 pub struct ActorHandle<E: Send + 'static> {
-    pub(crate) result: oneshot::Receiver<Result<ActorExit<E>, ()>>,
+    pub(crate) result: oneshot::Recv<Result<ActorExit<E>, ()>>,
 }
 
 impl<E: Send + 'static> Future for ActorHandle<E> {

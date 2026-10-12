@@ -35,7 +35,7 @@ socket2 = { workspace = true }
 [dev-dependencies]
 compio-macros = { workspace = true }
 
-futures-channel = { workspace = true }
+asyncband = { workspace = true, features = ["oneshot"] }
 rustls-pemfile = "2.0"
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 

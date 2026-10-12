@@ -126,10 +126,10 @@ async fn poll_concurrent_read_write_readiness() {
 
     let poll_fd = PollFd::new(server).unwrap();
 
-    let (read_started_tx, read_started_rx) = futures_channel::oneshot::channel();
-    let (write_started_tx, write_started_rx) = futures_channel::oneshot::channel();
-    let (read_done_tx, read_done_rx) = futures_channel::oneshot::channel();
-    let (write_done_tx, write_done_rx) = futures_channel::oneshot::channel();
+    let (read_started_tx, read_started_rx) = asyncband::oneshot::channel();
+    let (write_started_tx, write_started_rx) = asyncband::oneshot::channel();
+    let (read_done_tx, read_done_rx) = asyncband::oneshot::channel();
+    let (write_done_tx, write_done_rx) = asyncband::oneshot::channel();
 
     let mut read_started_tx = Some(read_started_tx);
     let mut write_started_tx = Some(write_started_tx);

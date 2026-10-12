@@ -18,7 +18,7 @@ mod_use = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 compio-driver = { workspace = true }
 
-futures-channel = { workspace = true }
+asyncband = { workspace = true, features = ["oneshot"] }
 windows-sys = { workspace = true, features = ["Win32_System_Threading"] }
 windows-threading = "0.100.0"
 

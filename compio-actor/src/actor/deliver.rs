@@ -79,7 +79,7 @@ impl<A: Actor> Delivering<A> {
 pub(crate) async fn run<A: Actor>(
     actor: A,
     myself: Mailbox<A>,
-    receiver: Receiver<A>,
+    mut receiver: Receiver<A>,
     mut state: A::State,
     supervision: Option<&Supervision<A>>,
 ) -> ActorExit<A::Error> {

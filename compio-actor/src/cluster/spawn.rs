@@ -8,7 +8,7 @@ use std::{
     task::{Context, Poll, ready},
 };
 
-use futures_channel::oneshot;
+use asyncband::oneshot;
 use futures_util::FutureExt;
 
 use super::Cluster;
@@ -130,8 +130,8 @@ pub enum SpawnFuture<A: Actor> {
     #[doc(hidden)]
     Pending {
         mailbox: Mailbox<A>,
-        result: oneshot::Receiver<Result<ActorExit<A::Error>, ()>>,
-        started: oneshot::Receiver<Result<(), A::Error>>,
+        result: oneshot::Recv<Result<ActorExit<A::Error>, ()>>,
+        started: oneshot::Recv<Result<(), A::Error>>,
     },
 }
 
@@ -142,8 +142,8 @@ impl<A: Actor> SpawnFuture<A> {
 
     fn pending(
         mailbox: Mailbox<A>,
-        result: oneshot::Receiver<Result<ActorExit<A::Error>, ()>>,
-        started: oneshot::Receiver<Result<(), A::Error>>,
+        result: oneshot::Recv<Result<ActorExit<A::Error>, ()>>,
+        started: oneshot::Recv<Result<(), A::Error>>,
     ) -> Self {
         Self::Pending {
             mailbox,
@@ -262,6 +262,6 @@ impl Cluster {
             Err(_) => return SpawnFuture::ready(Err(SpawnError::Unavailable)),
         };
 
-        SpawnFuture::pending(mailbox, result, started_rx)
+        SpawnFuture::pending(mailbox, result.into_future(), started_rx.into_future())
     }
 }
