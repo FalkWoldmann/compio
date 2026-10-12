@@ -27,8 +27,7 @@ futures-util = { workspace = true, features = ["io"] }
 scoped-tls = { workspace = true }
 pin-project-lite = { workspace = true }
 socket2 = { workspace = true }
-synchrony = { workspace = true }
-asyncband = { workspace = true, features = ["event"] }
+synchrony = { workspace = true, features = ["event"] }
 
 # Windows specific dependencies
 [target.'cfg(windows)'.dependencies]

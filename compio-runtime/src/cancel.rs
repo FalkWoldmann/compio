@@ -6,13 +6,12 @@ use std::{
     ops::DerefMut,
     pin::Pin,
     rc::Rc,
-    sync::Arc,
     task::{Context, Poll},
 };
 
-use asyncband::event::ManualResetEvent;
 use compio_driver::{Cancel, Key, OpCode, Proactor};
 use futures_util::{FutureExt, ready};
+use synchrony::unsync::event::{Event, EventListener};
 
 use crate::{ContextExt, Runtime};
 
@@ -20,7 +19,7 @@ struct Inner {
     tokens: RefCell<HashSet<Cancel>>,
     is_cancelled: Cell<bool>,
     driver: Rc<RefCell<Proactor>>,
-    notify: Arc<ManualResetEvent>,
+    notify: Event,
 }
 
 impl Debug for Inner {
@@ -71,20 +70,17 @@ impl CancelToken {
             tokens: RefCell::new(HashSet::new()),
             is_cancelled: Cell::new(false),
             driver: Runtime::with_current(|r| r.driver.clone()),
-            notify: Arc::default(),
+            notify: Event::new(),
         }))
     }
 
-    pub(crate) fn listen(&self) -> CancelListener {
-        CancelListener {
-            notify: self.0.notify.clone(),
-            wait: None,
-        }
+    pub(crate) fn listen(&self) -> EventListener {
+        self.0.notify.listen()
     }
 
     /// Cancel all operations registered with this token.
     pub fn cancel(self) {
-        self.0.notify.set();
+        self.0.notify.notify_all();
         if self.0.is_cancelled.replace(true) {
             return;
         }
@@ -140,7 +136,7 @@ impl Default for CancelToken {
 
 /// Future returned by [`CancelToken::wait`].
 pub struct WaitFuture {
-    listen: CancelListener,
+    listen: EventListener,
     token: CancelToken,
 }
 
@@ -150,30 +146,6 @@ impl WaitFuture {
             listen: token.listen(),
             token,
         }
-    }
-}
-
-/// Resolves once the token is cancelled, and stays resolved when polled again.
-pub(crate) struct CancelListener {
-    notify: Arc<ManualResetEvent>,
-    /// Only allocated once the listener has to wait.
-    wait: Option<Pin<Box<dyn Future<Output = ()>>>>,
-}
-
-impl Future for CancelListener {
-    type Output = ();
-
-    fn poll(mut self: Pin<&mut Self>, cx: &mut Context) -> Poll<()> {
-        let this = &mut *self;
-        if this.notify.is_set() {
-            return Poll::Ready(());
-        }
-        let wait = this
-            .wait
-            .get_or_insert_with(|| Box::pin(this.notify.clone().wait_owned()));
-        ready!(wait.as_mut().poll(cx));
-        this.wait = None;
-        Poll::Ready(())
     }
 }
 
