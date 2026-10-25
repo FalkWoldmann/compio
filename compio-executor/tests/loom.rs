@@ -199,3 +199,36 @@ fn test_join_while_complete() {
         let _ = thread1.join().unwrap();
     });
 }
+
+#[test]
+fn test_concurrent_detach_and_complete() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct CountDrop(Arc<AtomicUsize>);
+
+    impl Drop for CountDrop {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    loom::model(|| {
+        let exe = Executor::new();
+        let drops = Arc::new(AtomicUsize::new(0));
+        let output = CountDrop(drops.clone());
+
+        let handle = exe.spawn(async move { output });
+
+        let detach_thread = thread::spawn(move || handle.detach());
+
+        while exe.tick() {
+            thread::yield_now();
+        }
+
+        detach_thread.join().unwrap();
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+    });
+}

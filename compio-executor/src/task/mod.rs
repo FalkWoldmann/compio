@@ -234,16 +234,22 @@ impl Task {
     }
 
     /// Cancel the task.
-    ///
-    /// If `drop_result` is true, the result will be dropped if it exists.
-    pub fn cancel(&self, drop_result: bool) {
+    pub fn cancel(&self) {
         let header = self.header();
 
-        instrument!(compio_log::Level::TRACE,"Task::cancel", id = ?header.id, drop_result);
+        instrument!(compio_log::Level::TRACE, "Task::cancel", id = ?header.id);
 
         self.schedule();
-        let state = header.state.set_cancelled();
-        if drop_result && state.has_result() {
+        header.state.set_cancelled();
+    }
+
+    pub fn release_handle(&self) {
+        let header = self.header();
+
+        instrument!(compio_log::Level::TRACE, "Task::release_handle", id = ?header.id);
+
+        let state = header.state.release_handle();
+        if state.has_result() {
             header.state.set_has_result::<Strong, false>();
             unsafe { (header.vtable.drop_future)(self.0, true) }
         }
@@ -275,6 +281,11 @@ impl Task {
             if res.is_ready() {
                 debug!("Task finished");
                 let state = header.state.finish_running();
+
+                if !state.has_handle() {
+                    header.state.set_has_result::<Strong, false>();
+                    unsafe { (header.vtable.drop_future)(self.0, true) };
+                }
 
                 trace!(?state, "Try to wake up JoinHandle");
 
@@ -433,13 +444,7 @@ impl Drop for Task {
 
         debug_assert!(state.is_completed() | state.is_cancelled());
         debug_assert!(!state.is_setting_waker());
-
-        // If the result is still present, drop it now
-        // This happens when JoinHandle was dropped/detached without taking the
-        // result
-        if state.has_result() {
-            unsafe { (header.vtable.drop_future)(self.0, true) };
-        }
+        debug_assert!(!state.has_result());
 
         // If the waker is still present, drop it now
         // This happens when the Task is dropped when JoinHandle was setting

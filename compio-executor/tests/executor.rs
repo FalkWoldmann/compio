@@ -313,3 +313,70 @@ fn test_clear_with_spawn_on_drop() {
     exe.clear();
     assert_eq!(exe.num_alive_tasks(), 0);
 }
+
+fn detached_output_drop_thread(detach_after_tick: bool) -> std::thread::ThreadId {
+    use std::{
+        sync::{Arc, Mutex, mpsc},
+        thread::{self, ThreadId},
+    };
+
+    struct RecordDropThread(Arc<Mutex<Option<ThreadId>>>);
+
+    impl Drop for RecordDropThread {
+        fn drop(&mut self) {
+            *self.0.lock().unwrap() = Some(thread::current().id());
+        }
+    }
+
+    setup_log();
+
+    let exe = Executor::new();
+    let dropped_on = Arc::new(Mutex::new(None));
+    let output = RecordDropThread(dropped_on.clone());
+
+    let (waker_tx, waker_rx) = mpsc::channel::<Waker>();
+    let (release_tx, release_rx) = mpsc::channel();
+    let t = thread::spawn(move || {
+        let waker = waker_rx.recv().unwrap();
+        release_rx.recv().unwrap();
+        drop(waker);
+    });
+
+    let handle = exe.spawn(async move {
+        std::future::poll_fn(|cx| {
+            waker_tx.send(cx.waker().clone()).unwrap();
+            Poll::Ready(())
+        })
+        .await;
+        output
+    });
+    if detach_after_tick {
+        exe.tick();
+        handle.detach();
+    } else {
+        handle.detach();
+        exe.tick();
+    }
+
+    release_tx.send(()).unwrap();
+    t.join().unwrap();
+
+    let id = dropped_on.lock().unwrap().take();
+    id.expect("output was not dropped")
+}
+
+#[test]
+fn test_detached_output_dropped_on_executor_thread() {
+    assert_eq!(
+        detached_output_drop_thread(false),
+        std::thread::current().id()
+    );
+}
+
+#[test]
+fn test_output_detached_after_completion_dropped_on_executor_thread() {
+    assert_eq!(
+        detached_output_drop_thread(true),
+        std::thread::current().id()
+    );
+}

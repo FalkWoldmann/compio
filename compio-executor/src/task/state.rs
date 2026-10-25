@@ -28,7 +28,9 @@ const HAS_RESULT: usize = 1 << 5;
 /// `JoinHandle` is dropped without detaching or the Exector is dropped.
 const NOT_CANCELLED: usize = 1 << 6;
 
-const RC_SHIFT: usize = 7;
+const HAS_HANDLE: usize = 1 << 7;
+
+const RC_SHIFT: usize = 8;
 const RC_UNIT: usize = 1 << RC_SHIFT;
 const RC_MAX: usize = usize::MAX >> RC_SHIFT;
 
@@ -56,6 +58,7 @@ impl Debug for Snapshot {
             .field("completed", &self.is_completed())
             .field("has_result", &self.has_result())
             .field("cancelled", &self.is_cancelled())
+            .field("has_handle", &self.has_handle())
             .finish()
     }
 }
@@ -84,7 +87,7 @@ impl Consistency for Weak {
 impl State {
     /// Create a state with two given count.
     pub(crate) fn new<const N: usize>() -> Self {
-        const INIT: usize = NOT_SETTING_WAKER | NOT_CANCELLED;
+        const INIT: usize = NOT_SETTING_WAKER | NOT_CANCELLED | HAS_HANDLE;
 
         Self(crate::AtomicUsize::new((N * RC_UNIT) | INIT))
     }
@@ -131,6 +134,12 @@ impl State {
         trace!("set_cancelled");
 
         Snapshot(self.0.fetch_and(!NOT_CANCELLED, Strong::ACQ_REL))
+    }
+
+    pub(crate) fn release_handle(&self) -> Snapshot {
+        trace!("release_handle");
+
+        Snapshot(self.0.fetch_and(!HAS_HANDLE, Strong::ACQ_REL))
     }
 
     pub(crate) fn finish_running(&self) -> Snapshot {
@@ -216,6 +225,10 @@ impl Snapshot {
 
     pub(crate) fn has_result(&self) -> bool {
         self.0 & HAS_RESULT != 0
+    }
+
+    pub(crate) fn has_handle(&self) -> bool {
+        self.0 & HAS_HANDLE != 0
     }
 
     pub(crate) fn count(&self) -> usize {

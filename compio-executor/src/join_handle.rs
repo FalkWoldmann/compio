@@ -6,7 +6,6 @@ use std::{
     mem::ManuallyDrop,
     panic::resume_unwind,
     pin::Pin,
-    ptr,
     task::{Context, Poll},
 };
 
@@ -45,13 +44,15 @@ impl<T> JoinHandle<T> {
 
     /// Cancel the task and wait for the result, if any.
     pub async fn cancel(self) -> Option<T> {
-        self.task.as_ref()?.cancel(false);
+        self.task.as_ref()?.cancel();
         self.await.ok()
     }
 
     /// Detach the task to let it run in the background.
     pub fn detach(self) {
-        unsafe { ptr::drop_in_place(&raw mut ManuallyDrop::new(self).task) };
+        if let Some(task) = ManuallyDrop::new(self).task.take() {
+            task.release_handle();
+        }
     }
 
     /// Returns true if this JoinHandle has been finalized, either because
@@ -150,7 +151,8 @@ impl<T> Drop for JoinHandle<T> {
         instrument!(compio_log::Level::TRACE, "JoinHandle::drop");
 
         if let Some(task) = self.task.as_ref() {
-            task.cancel(true);
+            task.cancel();
+            task.release_handle();
         }
     }
 }
