@@ -38,7 +38,7 @@ impl AsyncRead for Repeat {
         slice.fill(MaybeUninit::new(self.0));
         // SAFETY: we just initialized exactly `len` bytes in `buf` from index
         // 0.
-        unsafe { buf.advance(len) };
+        unsafe { buf.advance_to(len) };
 
         BufResult(Ok(len), buf)
     }

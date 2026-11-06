@@ -279,6 +279,20 @@ fn repeat_read_vectored() {
     })
 }
 
+#[test]
+fn repeat_read_partially_filled() {
+    block_on(async {
+        let mut src = compio_io::repeat(42);
+        let mut buf = Vec::with_capacity(5);
+        buf.extend_from_slice(b"ab");
+
+        let (len, buf) = src.read(buf).await.unwrap();
+
+        assert_eq!(len, 5);
+        assert_eq!(buf, [42; 5]);
+    })
+}
+
 struct RepeatOne(u8);
 
 impl AsyncRead for RepeatOne {
